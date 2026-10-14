@@ -15,12 +15,21 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use ai_memory_core::{Sanitizer, truncate_utf8_bytes};
+
 use crate::payload::HookEvent;
 
-/// Maximum number of bytes read from Antigravity's `output.txt`.
-/// Matches the standard tool excerpt upper bound (2 KB) so spooled events
-/// remain compact and within bounded limits.
+/// Maximum number of bytes of Antigravity's `output.txt` placed in
+/// `tool_response`. Matches the standard tool excerpt upper bound (2 KB) so
+/// spooled events remain compact and within bounded limits.
 pub const MAX_ANTIGRAVITY_OUTPUT_BYTES: usize = 2048;
+
+/// How much of `output.txt` is read before the scrub that precedes the
+/// [`MAX_ANTIGRAVITY_OUTPUT_BYTES`] cap. Reading only the capped prefix would
+/// cut a secret straddling it in half and leave an unmatchable fragment for
+/// the sanitizer (#1114); the window is the same 64 KiB bound
+/// `ASSISTANT_MESSAGE_MAX_INPUT_BYTES` gives the assistant message.
+const ANTIGRAVITY_OUTPUT_READ_BYTES: usize = 64 * 1024;
 
 /// Check if a tool is eligible for output extraction from `output.txt`.
 ///
@@ -192,9 +201,18 @@ pub fn enrich_antigravity_step_output(
         return false;
     };
     let output_file = step_output_file_path(&artifact_dir, step_idx);
-    let Some(output) = read_step_output(&output_file, MAX_ANTIGRAVITY_OUTPUT_BYTES) else {
+    let Some(mut output) = read_step_output(&output_file, ANTIGRAVITY_OUTPUT_READ_BYTES) else {
         return false;
     };
+    if output.len() > MAX_ANTIGRAVITY_OUTPUT_BYTES {
+        // Scrub the full window before capping it, the order
+        // `payload::cap_object_fields` uses for the client spool cap. The
+        // server re-scrubs the capped text with its configured sanitizer.
+        output = truncate_utf8_bytes(
+            &Sanitizer::builtin().scrub(&output),
+            MAX_ANTIGRAVITY_OUTPUT_BYTES,
+        );
+    }
     if let Some(obj) = raw.as_object_mut() {
         obj.insert("tool_response".into(), serde_json::Value::String(output));
         true
@@ -350,6 +368,52 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("npm test passed: 42 tests OK")
         );
+    }
+
+    #[test]
+    fn test_enrich_antigravity_step_output_scrubs_before_the_cap() {
+        // Arrange: a private key straddling the 2 KB cap. Reading only the
+        // capped prefix leaves the BEGIN line without its END, which the
+        // sanitizer's PEM rule cannot match (#1114).
+        let dir = tempdir().unwrap();
+        let step_dir = dir.path().join(".system_generated").join("steps").join("7");
+        fs::create_dir_all(&step_dir).unwrap();
+        let key = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}-----END OPENSSH PRIVATE KEY-----\n",
+            "b3BlbnNzaC1rZXktdjEAAAAA\n".repeat(40),
+        );
+        let output = format!(
+            "{}{key}{}",
+            "build log line\n".repeat(120),
+            "trailing output\n".repeat(120),
+        );
+        let key_start = output.find("-----BEGIN").unwrap();
+        let key_end = output.find("-----END").unwrap();
+        assert!(key_start < MAX_ANTIGRAVITY_OUTPUT_BYTES && key_end > MAX_ANTIGRAVITY_OUTPUT_BYTES);
+        fs::write(step_dir.join("output.txt"), &output).unwrap();
+
+        let mut payload = serde_json::json!({
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "cat id_ed25519"}
+            },
+            "stepIdx": 7,
+            "artifactDirectoryPath": dir.path().to_str().unwrap()
+        });
+
+        // Act
+        let enriched = enrich_antigravity_step_output(&mut payload, HookEvent::PostToolUse, None);
+
+        // Assert
+        assert!(enriched);
+        let response = payload
+            .get("tool_response")
+            .and_then(serde_json::Value::as_str)
+            .unwrap();
+        assert!(response.len() <= MAX_ANTIGRAVITY_OUTPUT_BYTES);
+        assert!(response.contains("[REDACTED:private_key]"), "{response}");
+        assert!(!response.contains("PRIVATE KEY-----"), "{response}");
+        assert!(!response.contains("b3BlbnNzaC1rZXktdjEAAAAA"), "{response}");
     }
 
     #[test]
