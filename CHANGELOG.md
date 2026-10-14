@@ -12,6 +12,12 @@ version in [`docs/changelog/`](docs/changelog/):
 ## [Unreleased]
 
 ### Fixed
+- Fixed Antigravity CLI tool output storing a secret that straddled its
+  2 KB cut in clear text. The hook read only the first 2048 bytes of a
+  step's `output.txt` and the sanitizer saw that prefix, so a private key
+  printed by a `run_command` step lost its END line and its BEGIN line and
+  key body were spooled and stored unredacted. The hook now reads up to
+  64 KiB, scrubs it, and only then cuts it to 2 KB.
 - Fixed Windows capture dropping the body of file and shell tool events
   the client had kept. With `[capture] ignore_paths` active, server
   re-inspection compiled a POSIX never-match sentinel and treated the
