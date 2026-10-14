@@ -382,9 +382,16 @@ fn rule_based_findings(candidates: &[DecayCandidate], stale_days: f64) -> Vec<Li
             .and_then(serde_json::Value::as_bool)
             == Some(true);
         // Stale: episodic, older than the lambda-derived threshold, zero accesses.
+        // A pinned page is skipped as `sweep::is_decayable` skips it: the
+        // threshold tracks eviction, which never comes for a pin.
         #[allow(clippy::cast_precision_loss)]
         let age_days = (now_us - c.updated_at_us) as f64 / US_PER_DAY;
-        if c.tier == Tier::Episodic && age_days > stale_days && c.access_count == 0 {
+        if c.tier == Tier::Episodic
+            && !c.pinned
+            && !frontmatter_pinned
+            && age_days > stale_days
+            && c.access_count == 0
+        {
             out.push(LintFinding {
                 kind: "stale".into(),
                 severity: "info".into(),
@@ -953,6 +960,44 @@ mod tests {
         let findings = rule_based_findings(&candidates, STALE_DAYS);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].kind, "stale");
+    }
+
+    #[test]
+    fn rule_pass_skips_stale_for_pinned_episodic() {
+        let very_old = Timestamp::now().as_microsecond() - (90 * 86_400_000_000i64);
+        let column_pinned = DecayCandidate {
+            id: ai_memory_core::PageId::new(),
+            path: ai_memory_core::PagePath::new("sessions/pinned.md").unwrap(),
+            tier: Tier::Episodic,
+            pinned: true,
+            updated_at_us: very_old,
+            access_count: 0,
+            last_accessed_at_us: None,
+            frontmatter_json: "{}".into(),
+            expires_at_us: None,
+            salience: None,
+            compacted_at_us: None,
+        };
+        let frontmatter_pinned = DecayCandidate {
+            id: ai_memory_core::PageId::new(),
+            path: ai_memory_core::PagePath::new("sessions/fm-pinned.md").unwrap(),
+            pinned: false,
+            frontmatter_json: r#"{"pinned": true}"#.into(),
+            ..column_pinned.clone()
+        };
+        let unpinned = DecayCandidate {
+            id: ai_memory_core::PageId::new(),
+            path: ai_memory_core::PagePath::new("sessions/old.md").unwrap(),
+            pinned: false,
+            ..column_pinned.clone()
+        };
+        let findings = rule_based_findings(
+            &[column_pinned, frontmatter_pinned, unpinned],
+            STALE_DAYS,
+        );
+        let stale: Vec<_> = findings.iter().filter(|f| f.kind == "stale").collect();
+        assert_eq!(stale.len(), 1, "{findings:?}");
+        assert_eq!(stale[0].pages, ["sessions/old.md"]);
     }
 
     #[test]
