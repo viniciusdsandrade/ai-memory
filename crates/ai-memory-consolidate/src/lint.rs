@@ -375,6 +375,12 @@ fn rule_based_findings(candidates: &[DecayCandidate], stale_days: f64) -> Vec<Li
         std::collections::HashMap::new();
 
     for c in candidates {
+        let frontmatter: Option<serde_json::Value> = serde_json::from_str(&c.frontmatter_json).ok();
+        let frontmatter_pinned = frontmatter
+            .as_ref()
+            .and_then(|fm| fm.get("pinned"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
         // Stale: episodic, older than the lambda-derived threshold, zero accesses.
         #[allow(clippy::cast_precision_loss)]
         let age_days = (now_us - c.updated_at_us) as f64 / US_PER_DAY;
@@ -396,7 +402,6 @@ fn rule_based_findings(candidates: &[DecayCandidate], stale_days: f64) -> Vec<Li
         //      when it classifies an observation as a rule.
         //   2. Page path starts with `_rules/` — same routing
         //      target. Either signal suffices.
-        let frontmatter: Option<serde_json::Value> = serde_json::from_str(&c.frontmatter_json).ok();
         let kind_is_rule = frontmatter
             .as_ref()
             .and_then(|fm| fm.get("kind"))
@@ -437,11 +442,6 @@ fn rule_based_findings(candidates: &[DecayCandidate], stale_days: f64) -> Vec<Li
         // decay" but the TTL hard-deletes regardless of pin (an
         // explicit expiry is the more explicit statement). Surface the
         // combo so the operator resolves it before the sweep does.
-        let frontmatter_pinned = frontmatter
-            .as_ref()
-            .and_then(|fm| fm.get("pinned"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
         if c.expires_at_us.is_some() && (c.pinned || frontmatter_pinned) {
             out.push(LintFinding {
                 kind: "pinned_expiring".into(),
