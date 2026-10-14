@@ -12,6 +12,11 @@ version in [`docs/changelog/`](docs/changelog/):
 ## [Unreleased]
 
 ### Fixed
+- Fixed `ai-memory lint` reporting a pinned episodic page as stale in
+  every report. The stale rule measures how close an unread page is to
+  eviction, and the forget sweep never evicts a pinned page; it now skips
+  pages pinned by the column or by `pinned: true` in frontmatter, as the
+  sweep and the curator already did.
 - Fixed Windows capture dropping the body of file and shell tool events
   the client had kept. With `[capture] ignore_paths` active, server
   re-inspection compiled a POSIX never-match sentinel and treated the
