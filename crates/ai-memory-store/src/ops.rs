@@ -2429,12 +2429,16 @@ fn end_lifecycle_only_session_in_tx(
     // re-check would silently revert the router's verdict. Everything else,
     // including `stop` and `notification` (some harnesses, e.g. OpenCode,
     // fire these for purely internal work), is ephemeral.
+    // The predicate text is shared with the reader's SessionEnd aggregates
+    // (`SUBSTANTIVE_OBSERVATION_KIND_SQL`), so the two cannot drift.
     let has_substantive_observation: bool = tx.query_row(
-        "SELECT EXISTS( \
-             SELECT 1 FROM observations \
-             WHERE session_id = ?1 \
-               AND kind IN ('user-prompt', 'pre-tool-use', 'post-tool-use') \
-         )",
+        &format!(
+            "SELECT EXISTS( \
+                 SELECT 1 FROM observations \
+                 WHERE session_id = ?1 AND {} \
+             )",
+            crate::reader::SUBSTANTIVE_OBSERVATION_KIND_SQL
+        ),
         params![session_id.as_bytes()],
         |row| row.get(0),
     )?;
@@ -4047,6 +4051,20 @@ pub struct ObservationPruneOutcome {
     pub sessions_resynced: usize,
 }
 
+/// Active-work exclusion shared, byte for byte, by the observation prune and
+/// its dry-run count (`ReaderPool::prunable_observation_count`). The caller
+/// applies this once per distinct candidate session as alias `s`: a queued job
+/// still needs its raw capture, and an ended session whose observation count
+/// advanced has resumed but not yet reached the next consolidation enqueue.
+pub(crate) const OBSERVATION_PRUNE_SESSION_GUARD_SQL: &str = "NOT EXISTS ( \
+    SELECT 1 FROM session_consolidation_jobs j \
+    WHERE j.session_id = s.id \
+      AND j.state IN ('pending', 'running') \
+) AND s.ended_observation_count >= ( \
+    SELECT COUNT(*) FROM observations current \
+    WHERE current.session_id = s.id \
+)";
+
 /// Permanently delete one bounded batch of raw observations belonging to
 /// sessions that were already distilled into a live summary page.
 ///
@@ -4060,6 +4078,20 @@ pub struct ObservationPruneOutcome {
 /// by the same sweep is excluded for free, because the `ON DELETE SET NULL`
 /// foreign key has already cleared the pointer. A session with no `sessions`
 /// row, or one that never ended, matches nothing and can never be pruned.
+///
+/// A session with a consolidation job the worker can still claim is excluded
+/// by [`OBSERVATION_PRUNE_SESSION_GUARD_SQL`] even when every other predicate
+/// holds: that job — a `pending` row (a transient failure is recorded as a
+/// `pending` retry, not `failed`) or a `running` row whose stale lease the
+/// next claim reclaims — still reads the raw capture to consolidate the
+/// session, and pruning underneath it would consolidate a truncated session.
+/// `completed`, `failed` and `superseded` rows are terminal for the automatic
+/// worker and block nothing.
+///
+/// The same guard excludes a resumed session before its next job exists.
+/// `ended_observation_count` is the generation covered by its latest end; a
+/// larger live count means new capture has arrived and is not yet represented
+/// by the session-end page/queue state.
 ///
 /// `ORDER BY created_at` makes the batching deterministic: a run interrupted
 /// halfway leaves a clean age boundary rather than holes, so the next run
@@ -4088,24 +4120,29 @@ pub fn prune_consolidated_observations(
     let mut deleted = 0usize;
     let mut sessions: BTreeSet<Vec<u8>> = BTreeSet::new();
     {
-        let mut stmt = tx.prepare(
-            "DELETE FROM observations \
+        let guard = OBSERVATION_PRUNE_SESSION_GUARD_SQL;
+        let mut stmt = tx.prepare(&format!(
+            "WITH candidate_sessions AS ( \
+                 SELECT DISTINCT session_id FROM observations \
+                 WHERE workspace_id = ?1 AND project_id = ?2 AND created_at < ?3 \
+             ), eligible_sessions AS MATERIALIZED ( \
+                 SELECT s.id FROM candidate_sessions candidate \
+                 JOIN sessions s ON s.id = candidate.session_id \
+                 JOIN pages p ON p.id = s.summary_page_id \
+                 WHERE p.superseded_at IS NULL AND {guard} \
+             ) \
+             DELETE FROM observations \
              WHERE id IN ( \
                  SELECT o.id FROM observations o \
+                 JOIN eligible_sessions eligible ON eligible.id = o.session_id \
                  WHERE o.workspace_id = ?1 \
                    AND o.project_id = ?2 \
                    AND o.created_at < ?3 \
-                   AND EXISTS ( \
-                       SELECT 1 FROM sessions s \
-                       JOIN pages p ON p.id = s.summary_page_id \
-                       WHERE s.id = o.session_id \
-                         AND p.superseded_at IS NULL \
-                   ) \
                  ORDER BY o.created_at \
                  LIMIT ?4 \
              ) \
              RETURNING session_id",
-        )?;
+        ))?;
         let rows = stmt.query_map(
             params![
                 workspace_id.as_bytes(),
@@ -12361,6 +12398,76 @@ pub(crate) mod tests {
             end_lifecycle_only_session(&mut conn, &receiver).unwrap(),
             LifecycleOnlyEndOutcome::Substantive
         );
+    }
+
+    /// The writer's lifecycle-only re-check and the reader's existence query
+    /// (the router's early SessionEnd decision) must classify every
+    /// observation kind alike: a disagreement would have the writer revert the
+    /// router's verdict on a session the router just rendered a page for.
+    #[test]
+    fn the_lifecycle_only_verdict_follows_the_reader_predicate() {
+        let (tmp, mut conn, ws, proj) = fresh_db();
+        let reader = crate::reader::ReaderPool::new(&tmp.path().join("test.sqlite"), 1).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for kind in [
+            ObservationKind::SessionStart,
+            ObservationKind::UserPrompt,
+            ObservationKind::PreToolUse,
+            ObservationKind::PostToolUse,
+            ObservationKind::PreCompact,
+            ObservationKind::PostCompaction,
+            ObservationKind::Notification,
+            ObservationKind::Stop,
+            ObservationKind::SessionEnd,
+            ObservationKind::Other,
+        ] {
+            let session = SessionId::new();
+            begin_session(
+                &mut conn,
+                &NewSession {
+                    occurred_at: None,
+                    id: session,
+                    workspace_id: ws,
+                    project_id: proj,
+                    agent_kind: AgentKind::OpenCode,
+                    cwd: None,
+                    actor_user: None,
+                },
+            )
+            .unwrap();
+            insert_observation(
+                &mut conn,
+                &NewObservation {
+                    occurred_at: None,
+                    session_id: session,
+                    workspace_id: ws,
+                    project_id: proj,
+                    kind,
+                    extension: None,
+                    source_event: None,
+                    title: "t".into(),
+                    body: "b".into(),
+                    importance: 5,
+                },
+            )
+            .unwrap();
+            // Asked before the writer ends the session: the question is the
+            // same one, put to the rows as they are.
+            let reader_says_substantive = runtime
+                .block_on(reader.session_has_substantive_observation(ws, proj, session))
+                .unwrap();
+            let writer_says_substantive = matches!(
+                end_lifecycle_only_session(&mut conn, &session).unwrap(),
+                LifecycleOnlyEndOutcome::Substantive
+            );
+            assert_eq!(
+                reader_says_substantive, writer_says_substantive,
+                "{kind:?}: reader and writer classify the same single-row session differently"
+            );
+        }
     }
 
     #[test]
