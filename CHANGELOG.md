@@ -11,6 +11,208 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Added
+
+- Added a pointer to a session that was cut off without ending, so the next
+  harness continues from where the work stopped. A harness stopped by a quota
+  limit, a crash or a closed terminal never runs its session end and leaves no
+  handoff, so an older handoff or session page used to win. When the newest
+  captured work in a project belongs to another of the operator's sessions that
+  never ended and left no handoff after that work, session start now adds a
+  one-line notice naming that session's agent and id (no captured text) and
+  pointing at `memory_read_session_observations`. `memory_briefing` gains
+  `recent_sessions` (newest work first, with `ended`, `handed_off` and
+  `current`), and `memory_handoff_list` gains `newer_unended_session` when such
+  a session is newer than every open handoff. `memory_read_session_observations`
+  also accepts a harness's native session id, such as an OpenCode `ses_…` id.
+  The routing block and the handoff and retrieval skills tell agents to read
+  that session first, and the TypeScript SDK decodes both new fields.
+
+- Added first-party Qwen Code lifecycle and MCP support. `install-mcp --client
+  qwen-code` (aliases `qwen`, `qwencode`) writes a Streamable HTTP `httpUrl`
+  entry into `~/.qwen/settings.json`; a token-file install gets a stdio
+  `mcp-bridge` instead of embedding the bearer. `install-hooks --agent
+  qwen-code` merges ten Claude-shaped events (including `PostToolUseFailure`
+  and subagent start/stop) as native `ai-memory hook` commands with no script
+  bundle. `SessionStart` injects the prior handoff as
+  `hookSpecificOutput.additionalContext`; Qwen's own `SessionEnd` closes the
+  session. User-prompt capture uses Qwen's provenance-bearing
+  `submitted_prompt`, never an automated continuation in `prompt`. Capture
+  exclusions cover Qwen's Gemini-like tools. Qwen-only agent backups include
+  its settings, both documented global skill roots, `QWEN.md`, and `AGENTS.md`.
+  `setup` detects `~/.qwen`. There is no `ai-memory run qwen` adapter. ([#1487](https://github.com/akitaonrails/ai-memory/pull/1487))
+- Added zero-LLM substring retrieval for unspaced Han, Kana, and Hangul text.
+  Pages and observations gain transactionally maintained derived unigram/bigram
+  FTS indexes; existing unicode61 search and ranking remain unchanged for
+  Latin-only queries, while CJK matches participate in project, scoped,
+  global, temporal, raw-observation, and observation-evidence retrieval.
+  Upgraded stores backfill missing derived rows before accepting traffic, and
+  compaction rebuilds the auxiliary indexes with the existing FTS set.
+  ([#1433](https://github.com/akitaonrails/ai-memory/issues/1433))
+- Added a first-party Hermes Agent lifecycle and an `install-mcp --client
+  hermes` client. The `hooks:` block `install-hooks --agent hermes` prints now
+  also wires `on_session_start`, `pre_llm_call` (the prompt, never the
+  conversation history), `on_session_end` as a turn boundary and
+  `on_session_finalize` as the session end, and each primary-session
+  `pre_llm_call` checks for a pending handoff and brings it into that turn as
+  `{"context": ...}`. This includes a resumed native Hermes session. Hermes
+  events route by `TERMINAL_CWD` when it names an existing directory (in a
+  gateway, for the default profile only), and a delegated child's lifecycle
+  events are dropped. When the
+  community memory-provider plugin is installed, only the tool events are
+  printed. `install-mcp --client hermes` prints an `mcp_servers:` entry for the
+  session-less stdio bridge with no token in it, and refuses `--apply` ([#1454](https://github.com/akitaonrails/ai-memory/pull/1454)).
+- Added bounded local document extraction to the optional
+  `ai-memory-importer` companion. Its dry-run-first `document` command accepts
+  UTF-8 text/Markdown, text-layer PDF, DOCX, PPTX, XLSX, VTT, and
+  SRT; emits attributed, client-sanitized markdown; caps source, archive,
+  extracted text, PDF streams, sheets, and actual XLSX cells; and uses deterministic digest paths plus
+  conditional MCP writes for idempotent reruns without overwriting an existing
+  foreign page. OCR, images, and raw audio/video remain explicitly out of
+  scope.
+- Added passive per-workload LLM telemetry to `ai-memory status --json` and
+  `GET /admin/status`. The closed workload set covers consolidation, reranking,
+  auto-improvement, bootstrap, query answers, lint, profile maintenance, dream
+  merges, and experience abstraction, with process-lifetime calls, outcomes,
+  latency buckets, coarse token estimates, and provider-reported usage where available.
+  It records no prompt or output text and does not change provider/model
+  routing; public per-workload profiles remain deferred until measurements
+  justify their configuration and authentication surface.
+- Added structured pre-rank filters to `memory_query`: case-insensitive
+  `kind` and exact-array `tag`, typed `tier`, and literal `path_prefix`.
+  Filters apply consistently to project/scopes hybrid streams, cross-project
+  global FTS, `as_of` history, supplemental profile hits, and `pin_first`.
+  Filtered misses omit raw observations because those rows carry no page
+  metadata.
+- Added a read-only managed-workstream operations page at
+  `/web/workstreams`. On multi-user servers it is root-only; single-operator
+  installs retain their existing admin access. The bounded overview orders
+  live and interrupted work first and derives `active`, `interrupted`,
+  `completed`, and `empty` only from trusted run lifecycle fields and imported
+  event counts. It exposes no checkout paths, repository fingerprints, lease
+  owners, native session ids, source metadata, or transcript content, and it
+  does not broaden checkout-local `resume` discovery.
+- Added `ai-memory recent` and `GET /admin/recent` to list the most recently
+  updated wiki pages, newest first. The listing is scoped to the current
+  project by default (cwd / marker, or `--workspace`/`--project`); `--global`
+  covers every project and labels each hit with its workspace and project.
+  Each hit carries an RFC 3339 `updated_at` instead of an FTS rank. The admin
+  route is root-only on a multi-user server, the same as `/admin/search`.
+  ([#1379](https://github.com/akitaonrails/ai-memory/pull/1379))
+- Added an explicit `serve --allow-insecure-human-auth` (or
+  `AI_MEMORY_ALLOW_INSECURE_HUMAN_AUTH=true`) escape hatch for operators who
+  knowingly run password login over plain HTTP on a private LAN.
+  It is off by default, does not bypass the separate unauthenticated-exposure
+  guard, and prints an unconditional warning that passwords, API credentials,
+  session cookies, and memory data cross the network unencrypted. (#1383)
+- Added first-party Cline CLI lifecycle and MCP support. `install-hooks
+  --agent cline --apply` writes Cline's nine supported event files globally or
+  per project, refuses user-owned and symlinked targets, and keeps embedded
+  bearer credentials owner-only. `install-mcp --client cline --apply` writes
+  Cline's top-level transport fields and explicitly selects Streamable HTTP.
+  Detached start hooks recover handoffs through MCP; yolo mode disables hooks.
+  Also added `install-mcp --client freebuff --apply`, which registers the
+  sessionless stdio bridge in `~/.agents/mcp.json` without starting another
+  ai-memory server. (#1335)
+- Added `[ingest] drop_events` (env `AI_MEMORY_INGEST__DROP_EVENTS`), an
+  opt-in list of hook event kinds the server drops before storing them, next
+  to the existing `drop_tool_use_id_prefixes` and `drop_tool_names`. A dropped
+  event gets the same 202, `dropped_by_policy` metric and log as the other
+  policy drops, before the rate limiter, the ingest semaphore and the
+  sanitizer. Subagent classification precedes every id, name, and kind matcher,
+  so a matching marked event still seeds tracking for its unmarked tail. The
+  default drops nothing. `Config::load` checks each value
+  against the typed event kind and rejects unknown kinds and `session-start`
+  and `session-end`, which open and close sessions. The motivating case is
+  `pre-tool-use`: in one production store about 87% of those observations had
+  an empty body, and each pairs with a `post-tool-use` that carries the
+  content. With `pre-tool-use` dropped, a session whose only work was a tool
+  call that never finished now ends as lifecycle-only. (#1339)
+- Added opt-in `[sessions] idle_end_after_hours` (env
+  `AI_MEMORY_SESSIONS__IDLE_END_AFTER_HOURS`; default `0`, off; range
+  `1..=8760`). When it is set, the `serve` maintenance tick ends open sessions
+  with no activity for that many hours, such as a harness that crashed or a
+  terminal closed before `SessionEnd` fired. A substantive session gets its
+  `sessions/<id>.md` summary page, attributed to the session's owner, and its
+  consolidation job. A boundary-only session ends lifecycle-only and releases
+  the handoff it had accepted. The tick creates no handoff of its own and skips
+  sessions bound to an active managed run. A real `SessionEnd` or checkpoint
+  that lands while the tick runs wins, and the tick leaves that session alone.
+  `ended_at` is the time of the tick; the session's last activity goes in the
+  audit row. (#1338)
+- Added first-party DeepSeek Harness (DSH) lifecycle capture. `install-hooks
+  --agent dsh` (aliases `deepseek-harness`, `deepseek_harness`) stages the
+  new `hooks/dsh` bundle, writes a generated Claude Code `hooks.json`, and
+  prints a Cordis patch fragment that mounts DSH's official
+  `@deepseek-ai/dsh-hooks-claude-code` bridge on
+  `$DSH_HOME/profiles/<profile>/cordis.patch.yml` (the patch file itself is
+  never auto-written). DSH sessions are stored as `agent=dsh`, and its bridge
+  forwards Claude Code-shaped tool payloads, so `[capture] ignore_paths`
+  exclusions apply to its file, search and shell calls (Windows `pwsh`, POSIX
+  `bash`) like any other Claude-shaped adapter; the reserved Code Mode
+  `run_code` transport that its `headless` profile calls is treated as inline
+  program source. The bridge
+  delivers exactly seven events (no `PreCompact` or `SessionEnd`) and runs
+  `SessionStart` detached, so finished sessions close with
+  `finalize-session --agent dsh` and pending handoffs are recovered via
+  `memory_handoff_list` / `memory_handoff_accept`. (#1337)
+- Added an Antigravity skill root family. `install-skills --agent antigravity`
+  (aliases `antigravity-cli`, `agy`; also `install-instructions
+  --skills-agent antigravity`) writes the managed Agent Skills to both global
+  roots Antigravity reads, `~/.gemini/config/skills` (App and IDE) and
+  `~/.gemini/antigravity-cli/skills` (CLI), or to the workspace
+  `.agents/skills` with `--scope project`. `ai-memory setup` now uses it for
+  Antigravity, which until now got its skills only in `~/.agents/skills`, a
+  directory Antigravity does not read globally, and `uninstall --only skills`
+  sweeps both roots. MCP-driven routing refresh and `backup-agents` expose and
+  preserve the same roots, including the shared project `.agents/skills`.
+  (#1357)
+
+- Added a read-only wiki link graph in `/web`. The header **Graph** link opens
+  `/web/graph`, a server-rendered map of resolved wikilinks whose endpoints sit
+  in different projects, plus a table of those edges. Each project page links
+  to `/web/w/<workspace>/<project>/graph`, which shows that project's latest
+  unexpired pages and the resolved same-project links between them as an SVG
+  and a table. Both pages are HTML with no JavaScript.
+  `GET /api/v1/graph` now accepts `workspace` and `project` together to return
+  only edges that touch that project (passing only one of them is `400`), and
+  `GET /api/v1/workspaces/{workspace}/projects/{project}/graph` returns the
+  in-project node and edge lists. A project graph keeps at most 120 pages,
+  preferring those with the most same-project neighbours and then the most
+  recently updated; the store applies that cap before loading nodes or their
+  selected edges into the process. Expired pages stay hidden. An edge still
+  requires both ends to be readable. ([#1378](https://github.com/akitaonrails/ai-memory/pull/1378))
+- Added Antigravity hook parity with Claude Code and Codex for the `agy` CLI,
+  the desktop App and the IDE. `install-hooks --agent antigravity-cli` now
+  wires the native `SessionStart`, which injects the handoff as an
+  `injectSteps` system message that stays in the conversation, where the
+  ephemeral message it replaces was dropped after the first turn.
+  `PreInvocation` gets its own `pre-invocation` handler: on builds without
+  `SessionStart`, the first turn's call stands in for it, once per
+  conversation. The native hook now reads each turn's prompts from the
+  conversation's own transcript (`transcriptPath`, only under
+  `~/.gemini/<app>/brain/<conversationId>/`, no symlinks out of it, 8 MiB per
+  hook and a 100 ms filesystem deadline) and records them as user prompts,
+  so summaries and handoffs carry them. A timed-out read leaves its cursor
+  untouched and retries on the next hook. A `Stop` that finished the turn
+  (`NO_TOOL_CALL` or `model_stop`) with
+  `fullyIdle: true` writes a turn checkpoint, the path OpenCode 2 uses: the
+  summary page and one handoff are refreshed and the conversation stays open,
+  so `finalize-session` is no longer needed for normal use. It remains the
+  explicit close, hands the baton over without the 10-minute quiet period,
+  queues opt-in consolidation, and skips its `history.jsonl` prompt replay
+  for a conversation whose prompts were already captured. Rerun
+  `install-hooks --agent antigravity-cli --apply` to add `SessionStart`;
+  existing native-hook installs get the prompts and checkpoints without it.
+  A turn checkpoint never ends a conversation, even a turn with no captured
+  prompt or tool call, so a handoff it claimed at start is never offered
+  again; the conversation start is claimed atomically, so a concurrent
+  `SessionStart` and first `PreInvocation` cannot both claim a handoff;
+  prompt ingest keys include the prompt's time and text, so a rewind that
+  reuses step numbers keeps its new prompts; and the transcript is opened
+  with `O_NOFOLLOW | O_NONBLOCK` and, on Linux, checked against the opened
+  descriptor's real path. (#1416)
+
 ### Security
 - Updated `rustls-webpki` 0.103.15 → 0.103.16 for
   [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382), in
@@ -21,6 +223,13 @@ version in [`docs/changelog/`](docs/changelog/):
   relay and wiki sync companions take the same `rustls-webpki` bump.
 
 ### Fixed
+- Reserved local-embedding capacity for interactive search queries instead of
+  allowing concurrent page writes and backfill work to occupy every inference
+  slot. Excess queries fall back immediately to non-vector retrieval, and a
+  cancelled request retains its slot until its non-cancellable CPU inference
+  actually ends. An opt-in real-model contention probe records idle,
+  unbounded-load, and bounded-load p50/p95 query latency; hosted embedding
+  providers are unchanged.
 - A resumed session that had already ended (`claude --resume` after a clean
   exit, for example) now still gets its session-start context. An ended
   session may not take a handoff, and that refused claim used to fail the whole
