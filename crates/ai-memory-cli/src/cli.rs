@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
 /// Parse the process argv while making the documented `run` boundary real:
@@ -26,7 +26,21 @@ where
 {
     let mut args = args.into_iter().map(Into::into).collect::<Vec<_>>();
     delimit_run_native_args(&mut args);
-    Cli::try_parse_from(args)
+    let matches = <Cli as clap::CommandFactory>::command().try_get_matches_from(args)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if let Command::Run(run) = &mut cli.command {
+        // The value parser collapses every `claude*` spelling onto
+        // `RunHarnessChoice::Claude`; keep the typed spelling so `run` can
+        // prefer a same-named wrapper executable.
+        run.claude_wrapper = matches
+            .subcommand_matches("run")
+            .and_then(|run_matches| run_matches.get_raw("harness"))
+            .and_then(|mut raw| raw.next())
+            .and_then(std::ffi::OsStr::to_str)
+            .and_then(claude_wrapper_spelling)
+            .map(str::to_owned);
+    }
+    Ok(cli)
 }
 
 fn delimit_run_native_args(args: &mut Vec<OsString>) {
@@ -212,7 +226,11 @@ pub enum Command {
     /// Prints what it would remove and changes nothing unless `--confirm` is
     /// passed. See also `ai-memory status` for the reclaimable figure.
     ReclaimLedgerVersions(ReclaimLedgerVersionsArgs),
-    /// Snapshot wiki/, db/, and config.toml into a gzipped tarball.
+    /// Snapshot wiki/, db/, and an in-data-dir config.toml into a gzipped tarball.
+    ///
+    /// This is not a complete host-migration archive: root/hook credentials,
+    /// external config files, raw workstream ledgers, logs, and models are
+    /// intentionally excluded. See docs/lifecycle-ops.md before moving hosts.
     Backup(BackupArgs),
     /// Snapshot AI agent configurations, skills, and plugins into a portable archive.
     #[command(name = "backup-agents")]
@@ -486,9 +504,16 @@ pub struct RunArgs {
     /// Agent harness to launch. When omitted, continue the newest managed or
     /// checkout-local session among the auto-detected harnesses. Any value
     /// starting with `claude` (e.g. `claude-corp`, `claude-personal`) also
-    /// selects the Claude harness — see `parse_run_harness_choice`.
+    /// selects the Claude harness — see `parse_run_harness_choice` — and, when
+    /// no `--executable` is given and an executable with that exact name is on
+    /// `PATH`, launches it instead of plain `claude`.
     #[arg(value_parser = parse_run_harness_choice)]
     pub harness: Option<RunHarnessChoice>,
+    /// The `claude*` spelling typed as `harness` when it is a wrapper name
+    /// rather than a fixed alias (`claude`, `claude-code`). Filled by
+    /// [`try_parse_from`]; `run` uses it as the default `--executable`.
+    #[arg(skip)]
+    pub claude_wrapper: Option<String>,
     /// Native harness arguments, forwarded byte-for-byte and in order.
     #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
     pub native_args: Vec<OsString>,
@@ -552,13 +577,13 @@ pub enum RunHarnessChoice {
 /// `PATH`-visible wrapper script per account (a plain shell `alias` is
 /// invisible to us — `ai-memory run` execs directly, without going through
 /// an interactive shell). Naming those wrappers `claude-corp` /
-/// `claude-personal` and then passing `--executable claude-corp` (bare names
-/// resolve through `PATH` just like the default) already selects the right
-/// binary; this parser just stops the harness argument itself from being
-/// rejected as an unknown value, so `ai-memory run claude-corp --executable
-/// claude-corp` (or any other `claude*` spelling used consistently) reads
-/// naturally instead of forcing every account onto the literal `claude`
-/// token.
+/// `claude-personal` makes the spelling itself readable in shell history, and
+/// this parser stops it being rejected as an unknown value.
+///
+/// The typed spelling is kept (see [`RunArgs::claude_wrapper`]): when it names
+/// an executable on the launch `PATH` and `--executable` is absent, `run`
+/// launches that wrapper. Before, the spelling was dropped here and plain
+/// `claude` started on the wrong account without any hint.
 fn parse_run_harness_choice(value: &str) -> Result<RunHarnessChoice, String> {
     use clap::ValueEnum as _;
     if let Ok(choice) = RunHarnessChoice::from_str(value, true) {
@@ -576,6 +601,15 @@ fn parse_run_harness_choice(value: &str) -> Result<RunHarnessChoice, String> {
     Err(format!(
         "invalid value '{value}' for harness; expected one of: {known}, or any `claude*` spelling"
     ))
+}
+
+/// The wrapper name behind a `claude*` harness spelling, or `None` for the
+/// fixed names (`claude`, `claude-code`, any case) and non-Claude values.
+fn claude_wrapper_spelling(value: &str) -> Option<&str> {
+    use clap::ValueEnum as _;
+    (RunHarnessChoice::from_str(value, true).is_err()
+        && parse_run_harness_choice(value) == Ok(RunHarnessChoice::Claude))
+    .then_some(value)
 }
 
 /// Parse one `KEY=VALUE` entry for `--env` (also reused for `--env-file`
@@ -1500,8 +1534,9 @@ pub struct PurgeProjectArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long, conflicts_with = "project_id")]
     pub project: Option<String>,
     /// Project id (UUID) to purge, as an alternative to `--project`.
@@ -1553,8 +1588,9 @@ pub struct PurgeSessionArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
     /// REQUIRED for the purge to run. Without this flag the CLI errors
@@ -1595,11 +1631,11 @@ pub struct RenameProjectArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Current project name. When omitted, auto-derives from the
-    /// basename of the current git repo root (or CWD) — handy when
-    /// running `ai-memory rename-project --to new-name` from a dir
-    /// that was JUST renamed (the basename will be the new name, so
-    /// you'll want to pass --from explicitly in that workflow).
+    /// Current project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name. After renaming the
+    /// directory itself, pass `--from`: a checkout with no marker or
+    /// remote would resolve to the new name.
     #[arg(long, conflicts_with = "project_id")]
     pub from: Option<String>,
     /// Project id (UUID) to rename, as an alternative to `--from`.
@@ -1623,8 +1659,9 @@ pub struct MoveProjectArgs {
     /// `--to-workspace` names the destination and stays literal.
     #[arg(long)]
     pub from_workspace: Option<String>,
-    /// Project name to move. When omitted, auto-derived from the basename
-    /// of the current git repo root (or CWD if no git repo).
+    /// Project name to move. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long, conflicts_with = "project_id")]
     pub project: Option<String>,
     /// Project id (UUID) to move, as an alternative to `--project`.
@@ -1821,9 +1858,10 @@ pub struct BootstrapArgs {
     /// use, so bootstrap pages land where the session captures do.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the resolved repo path — same heuristic the hook router uses
-    /// to bucket per-cwd observations, so the bootstrap pages land
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name (not `--repo-path`), the
+    /// same resolution the hook router uses, so the bootstrap pages land
     /// in the same project as future session captures.
     ///
     /// Dot-prefixed dirs are preserved verbatim — `~/.config` becomes
@@ -2270,6 +2308,10 @@ pub struct RestoreArgs {
     /// Overwrite an existing non-empty data dir.
     #[arg(long)]
     pub force: bool,
+    /// Confirm that the configured token pepper is the original one for a
+    /// pre-verifier backup that already contains native API keys.
+    #[arg(long)]
+    pub accept_legacy_api_key_pepper: bool,
 }
 
 /// Arguments for `restore-agents`.
@@ -2855,8 +2897,9 @@ pub struct EmbedArgs {
     /// Workspace name (auto-created if absent).
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo). Matches the
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name. Matches the
     /// hook router's per-cwd convention so this command targets the
     /// same project sessions write into.
     #[arg(long)]
@@ -2872,8 +2915,9 @@ pub struct ForgetSweepArgs {
     /// Workspace name (auto-created if absent).
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
 }
@@ -2892,8 +2936,9 @@ pub struct LintArgs {
     /// Workspace name (auto-created if absent).
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
 }
@@ -2911,8 +2956,9 @@ pub struct CuratorArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
     /// Emit only machine-readable JSON.
@@ -2927,8 +2973,9 @@ pub struct AutoImproveReportArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
     /// Lookback window in days.
@@ -2955,8 +3002,9 @@ pub struct AutoImproveArgs {
     /// `workspace`, else `default`.
     #[arg(long)]
     pub workspace: Option<String>,
-    /// Project name. When omitted, auto-derived from the basename of
-    /// the current git repo root (or CWD if no git repo).
+    /// Project name. When omitted, taken from the nearest
+    /// `.ai-memory.toml` marker's `project`, then from the git remote,
+    /// then from the current directory's name.
     #[arg(long)]
     pub project: Option<String>,
     /// Override `[auto_improve].min_observations` for this run.
@@ -3339,9 +3387,10 @@ pub struct InstallMcpArgs {
     /// in `[auth].bearer_token_file`.
     #[arg(skip)]
     pub stdio_bridge: bool,
-    /// The data dir a bridge entry passes as `--data-dir`, for a client that
-    /// starts its MCP servers with a cleared environment (Muse Code), where
-    /// the bridge could not otherwise find this install's config and token.
+    /// The data dir a bridge entry passes as `--data-dir`: always for a client
+    /// that starts its MCP servers with a cleared environment (Muse Code), and
+    /// for any other bridge entry when the install was given a data dir, so
+    /// the bridge reads the same config and token as the install's hooks.
     /// Set by the installer, never a flag.
     #[arg(skip)]
     pub bridge_data_dir: Option<std::path::PathBuf>,
@@ -4467,6 +4516,47 @@ mod tests {
             };
             assert!(matches!(args.harness, Some(RunHarnessChoice::Claude)));
         }
+    }
+
+    #[test]
+    fn claude_wrapper_spelling_is_kept_only_for_non_fixed_names() {
+        let wrapper = |name: &str| {
+            let cli = crate::cli::try_parse_from(["ai-memory", "run", name]).unwrap();
+            let Command::Run(args) = cli.command else {
+                panic!("expected run for {name}");
+            };
+            args.claude_wrapper
+        };
+        assert_eq!(wrapper("claude-glm").as_deref(), Some("claude-glm"));
+        assert_eq!(wrapper("CLAUDE-WORK").as_deref(), Some("CLAUDE-WORK"));
+        assert_eq!(wrapper("claudex").as_deref(), Some("claudex"));
+        for fixed in [
+            "claude",
+            "CLAUDE",
+            "Claude-Code",
+            "claude-code",
+            "codex",
+            "kiro",
+        ] {
+            assert_eq!(wrapper(fixed), None, "{fixed}");
+        }
+
+        // Wrapper-owned flags before the harness, native args after it.
+        let cli = crate::cli::try_parse_from([
+            "ai-memory",
+            "run",
+            "--executable",
+            "/opt/claude-x",
+            "claude-glm",
+            "--model",
+            "opus",
+        ])
+        .unwrap();
+        let Command::Run(args) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(args.claude_wrapper.as_deref(), Some("claude-glm"));
+        assert_eq!(args.native_args, ["--model", "opus"]);
     }
 
     #[test]

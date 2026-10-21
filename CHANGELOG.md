@@ -11,7 +11,110 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Security
+- Updated `rustls-webpki` 0.103.15 → 0.103.16 for
+  [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382), in
+  which certificate verification may accept distrusted intermediates, and
+  `webpki-root-certs` 1.0.9 → 1.0.10 for
+  [RUSTSEC-2026-0383](https://rustsec.org/advisories/RUSTSEC-2026-0383), whose
+  bundled roots still trusted distrusted emSign intermediates. The importer,
+  relay and wiki sync companions take the same `rustls-webpki` bump.
+
 ### Fixed
+- Bound native API-key hashes to their configured pepper with a persisted
+  Argon2id verifier. A restored database with existing keys now refuses to
+  serve under a different `[auth].token_pepper` instead of silently making
+  every key return 401; pepper rotation remains allowed while no keys exist.
+  A pre-verifier backup containing keys fails restore until the operator
+  supplies the original pepper and explicitly confirms it with
+  `--accept-legacy-api-key-pepper`.
+  ([#1495](https://github.com/akitaonrails/ai-memory/issues/1495))
+
+- Defined `ai-memory backup` as an online data snapshot rather than a complete
+  host image, documented the separately protected config, root credentials and
+  raw ledgers a host move may require, and corrected the missing-token startup
+  remedy so it no longer implies the snapshot contains `auth-tokens/`.
+  ([#1494](https://github.com/akitaonrails/ai-memory/issues/1494))
+
+- Accepted the exact CRLF migration checksums written by Windows-native
+  releases before v3.1.2 and replaced them transactionally with the current
+  LF checksums before strict migration validation. Unknown migration changes
+  still fail closed. Bare hook reinstallation also preserves the Windows
+  exec-form `--capture-assistant` opt-in instead of looking only inside the
+  command string. ([#1499](https://github.com/akitaonrails/ai-memory/issues/1499))
+
+- Held `ai-memory run` heartbeat notices while the harness owns the terminal
+  and printed them after it exits, so a server outage no longer writes into the
+  harness TUI. Only the first and latest notices are replayed, with a count of
+  the rest. A transport outage that changes into a server-side lease rejection
+  is reported as a new state instead of being hidden as the same failure.
+  ([#1500](https://github.com/akitaonrails/ai-memory/issues/1500))
+
+- Dropped stopwords from the quoted bag of words a search falls back to when
+  its text looks like FTS5 syntax but does not parse, such as a question
+  ending in `(prod)`. The fallback OR-joined `what`, `is`, `the` and `of`
+  with the content words; it now filters through the configured
+  `[search.fts] stopwords` list like a bare query, keeps the words the user
+  quoted, and keeps every word when all of them are stopwords.
+
+- Corrected `docs/lifecycle-ops.md` on two points. The `move-project` merge
+  drops everything the source project owns, the same set `purge-project`
+  deletes. This includes managed workstreams, cross-project messages,
+  auto-improvement and profile-harvest state, consolidation jobs, ingest keys,
+  entities, page feedback, per-session purge tombstones and project grants as well as
+  sessions, observations and handoffs. The `400` for sending both a project
+  name and an id, or neither, applies to the admin endpoints; the CLI resolves
+  a missing project from the marker, the git remote, then the directory name.
+  ([#1493](https://github.com/akitaonrails/ai-memory/issues/1493))
+
+- Named the install's data dir in the `mcp-bridge` entries `install-mcp`
+  writes for Claude Code and the session-less stdio bridge when the install
+  was given one (`--data-dir`, `AI_MEMORY_DATA_DIR` or `data_dir` in the
+  config), as Muse's entry and the install's hooks already did. The bridge
+  read the default data dir's config and token instead, so on a host whose
+  server uses the default data dir it authenticated with the server's root
+  bearer.
+  ([#1489](https://github.com/akitaonrails/ai-memory/issues/1489))
+
+- Let `ai-memory mcp-bridge` send the key `install-hooks --apply --auth-token`
+  stored in `<data_dir>/auth-token` when no bearer is configured, ahead of the
+  loopback root token discovery, so a remote
+  client whose hooks hold a native API key wires the MCP bridge without
+  copying the key. `install-mcp --apply --auth-token` now stores the key there
+  for the Claude Code (`--session-aware`) and Muse bridge entries and leaves
+  it out of the harness config, where it outlived a key rotation; existing
+  entries keep working. `uninstall --only hooks` keeps the stored key while
+  such a bridge entry remains. ([#1490](https://github.com/akitaonrails/ai-memory/issues/1490))
+
+- Kept the bridge from sending a discovered root key to a non-loopback
+  server, rejected a malformed stored user key instead of falling through to
+  root, made failed installs roll back newly stored credentials, and included
+  the absolute data dir in Claude Code's printed session-aware command as well
+  as its JSON entry.
+  ([#1490](https://github.com/akitaonrails/ai-memory/issues/1490))
+
+## [3.1.2] - 2026-10-20
+
+### Fixed
+- Reported appended and removed lines in wiki sync conflict summaries, with
+  an explicit end-of-file marker instead of line 0 and matching previews.
+  ([#1477](https://github.com/akitaonrails/ai-memory/issues/1477))
+- Accepted ordinary absolute and relative Windows destination paths in the
+  wiki sync companion while still refusing directory junctions and symlinks.
+  ([#1476](https://github.com/akitaonrails/ai-memory/issues/1476))
+- Preserved dotted Windows harness names when resolving PATHEXT wrappers, so a
+  command such as `agent.tool` launches `agent.tool.cmd` rather than `agent.cmd`.
+  ([#1475](https://github.com/akitaonrails/ai-memory/pull/1475))
+- Corrected Pi MCP/setup-agent guidance to name `ai-memory-pi.ts`, described
+  its location when `PI_CODING_AGENT_DIR` is set, and corrected OMP's
+  setup-agent hint to name `ai-memory-omp.ts`.
+  ([#1446](https://github.com/akitaonrails/ai-memory/pull/1446))
+- Launched the wrapper executable named by a `claude*` harness spelling
+  (`ai-memory run claude-glm`) when it is on the launch `PATH` and no
+  `--executable` is given, instead of silently starting plain `claude` on the
+  wrong account. When no such executable exists, `run` now prints a warning
+  and still starts `claude`. An explicit `--executable` still wins.
+  ([#1486](https://github.com/akitaonrails/ai-memory/pull/1486))
 - Routed OpenCode's `claude-haiku-5-5` through the Anthropic Messages API for
   both Go and Zen instead of the unsupported Chat Completions protocol.
   ([#1470](https://github.com/akitaonrails/ai-memory/issues/1470))
@@ -28,6 +131,9 @@ version in [`docs/changelog/`](docs/changelog/):
   keeping unknown migration edits fatal. CI now rejects changes to migration
   files already present on a PR's base branch.
   ([#1443](https://github.com/akitaonrails/ai-memory/issues/1443))
+- Kept the A2 compaction footer out of SessionStart excerpts for pages with
+  CRLF line endings, matching the existing LF behavior.
+  ([#1474](https://github.com/akitaonrails/ai-memory/pull/1474))
 - Sent `response_format=json_schema` for structured OpenCode Chat Completions
   calls, with the existing tolerant fallback for models that reject it, so
   `memory_query answer=true` no longer receives unstructured prose by default.
@@ -218,6 +324,20 @@ version in [`docs/changelog/`](docs/changelog/):
   `as_of` that is not an ISO-8601 instant, instead of misreporting them as
   internal server errors.
   ([#1468](https://github.com/akitaonrails/ai-memory/issues/1468))
+- Built the web UI's templates without askama's `config` feature, which only
+  reads an `askama.toml` that ai-memory does not have. The unmaintained
+  `basic-toml` (RUSTSEC-2026-0374) is no longer a dependency, and templates
+  render as before. ([#1482](https://github.com/akitaonrails/ai-memory/issues/1482))
+- Copied the release into place in `install.ps1` instead of moving it, so an
+  antivirus scan that still holds the just-verified `ai-memory.exe` no longer
+  stops a Windows install with "the process cannot access the file because it
+  is being used by another process".
+  ([#1480](https://github.com/akitaonrails/ai-memory/issues/1480))
+- Invoked Gemini CLI's native Windows lifecycle commands with PowerShell's
+  call operator. Gemini CLI 0.23.0 and later run hook commands through
+  PowerShell, where the quoted `ai-memory.exe` path failed to parse, so every
+  hook exited with an error and the session captured nothing.
+  ([#1484](https://github.com/akitaonrails/ai-memory/issues/1484))
 
 ## [3.1.1] - 2026-10-17
 
@@ -1486,7 +1606,8 @@ version in [`docs/changelog/`](docs/changelog/):
   session-timeline owner rule. Another operator's observations still rank
   shared session pages.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.1.1...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.1.2...HEAD
+[3.1.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.2
 [3.1.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.1
 [3.1.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.0
 [3.0.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.0.1
