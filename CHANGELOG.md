@@ -11,6 +11,8 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-10-21
+
 ### Added
 
 - Added a pointer to a session that was cut off without ending, so the next
@@ -223,6 +225,78 @@ version in [`docs/changelog/`](docs/changelog/):
   relay and wiki sync companions take the same `rustls-webpki` bump.
 
 ### Fixed
+- Memory health no longer counts a link from a superseded or TTL-expired page
+  version as a reference. A page whose only inbound link was removed by a later
+  edit was reported as linked, because the old version's `links` row survives
+  the edit and is repointed at the new latest id, so the orphan count and
+  detail list disagreed with the page's own backlinks.
+  ([#1526](https://github.com/akitaonrails/ai-memory/pull/1526))
+- A `title:` or `body:` search filter whose term carries a second colon, such
+  as `title:10:30`, now keeps its column. FTS5 read the inner `10` as a column
+  name and rejected the whole expression, so the query degraded to the quoted
+  bag of words: the filter was dropped and every column was searched for the
+  literal word `title`.
+  ([#1521](https://github.com/akitaonrails/ai-memory/pull/1521))
+- `memory_query` no longer discards `as_of` on a global query. An explicit
+  `global` with `as_of` is now refused, as the error message always claimed,
+  and a repo on `[recall] default_global` no longer broadens an `as_of` query
+  to global and answers it with present-day rows.
+  ([#1519](https://github.com/akitaonrails/ai-memory/pull/1519))
+- A `429` or `5xx` from a token endpoint is now a transient provider error
+  rather than an auth failure. The Copilot token exchange, which GitHub
+  rate-limits per account, and the shared `openai-oauth`/OIDC refresh both
+  reported throttling as a credential problem, so the fallback chain stopped
+  instead of trying the next provider and the operator was told to log in
+  again for a grant that was never rejected.
+  ([#1520](https://github.com/akitaonrails/ai-memory/pull/1520))
+- The Gemini embedder now cuts a long input to the same 8 KB head as the
+  OpenAI, Copilot and local embedders. It sent the whole page, while the
+  default `gemini-embedding-001` takes at most 2,048 input tokens, and a
+  refused page embedding is only logged, so a long page could end up with no
+  vector. Voyage is unchanged: its API shortens an over-long input itself.
+  ([#1513](https://github.com/akitaonrails/ai-memory/pull/1513))
+- `memory_auto_improve` now reports an exhausted implicit queue (every
+  completed session already has a review run) as invalid params instead of an
+  internal error, matching `memory_consolidate` for the same dead end. A client
+  no longer reads the routine end of the queue as a server fault and retries it.
+  ([#1518](https://github.com/akitaonrails/ai-memory/pull/1518))
+- The wiki's git objects and refs are now synced to disk. libgit2 renamed them
+  into place without fsync, so a power loss could keep a ref naming a commit
+  whose object was never written, and every later checkpoint failed. Every
+  repository handle ai-memory opens now turns on `core.fsyncObjectFiles` from
+  `.git/ai-memory.gitconfig`, a file only libgit2 reads, so `.git/config` is
+  untouched and the git CLI shows no deprecation warning; an explicit `false`
+  in `.git/config` is kept. Startup logs an `ERROR` when `HEAD` does not
+  resolve to a readable commit, and a failed bootstrap auto-commit is logged
+  instead of dropped. `docs/lifecycle-ops.md` describes the repair for a
+  history already damaged.
+  ([#1511](https://github.com/akitaonrails/ai-memory/issues/1511))
+- `memory_read_session_observations` without a `session_id` now reads the
+  session with the newest captured work instead of the newest one that ended.
+  A harness cut off without ending (a quota limit, an aborted turn, a crash)
+  never ends its session, so the agent taking its work over used to get some
+  older session, often from another checkout. The default now skips the
+  caller's own session, prefers a session in the caller's cwd, and falls back
+  to the latest completed session only when nothing worked in the last 30
+  days. It stays owner-filtered and bound to the resolved project. (#1512)
+- A server whose hook router could not read an event's working directory no
+  longer stops answering. Resolving a new cwd runs git discovery on it, and on
+  macOS a LaunchAgent binary without Full Disk Access can block indefinitely
+  on a protected folder or an external volume; that `open()` ran on an async
+  worker and took the HTTP accept loop down with it, so `/mcp`, `/hook` and
+  `/web` timed out while the hook spool grew. Those probes now run on the
+  blocking pool behind four permits and a 2-second deadline, and an event whose
+  cwd cannot be read in time is dropped with a warning instead of stalling the
+  server or being routed on a guess. `docs/macos.md` now explains the Full Disk
+  Access grant. (#1514)
+- Cold-cluster dedup (A3) and the opt-in dream pass (B2) now merge a cold set
+  of exactly `min_pts` near-duplicates. The adaptive eps returned nothing when
+  the cold set had no more points than the density floor, so with the default
+  `min_pts = 2` a lone pair of near-identical cold pages was never merged,
+  while the same pair next to any unrelated third cold page was. The
+  conservative `max_eps` ceiling still decides whether a pair is close enough
+  to merge.
+  ([#1528](https://github.com/akitaonrails/ai-memory/pull/1528))
 - Reserved local-embedding capacity for interactive search queries instead of
   allowing concurrent page writes and backfill work to occupy every inference
   slot. Excess queries fall back immediately to non-vector retrieval, and a
@@ -236,6 +310,36 @@ version in [`docs/changelog/`](docs/changelog/):
   session-start fetch whenever any handoff was open, so the session started
   with no profile digest, brief or inbox notice at all. The refusal now costs
   only the claim, and the handoff stays open.
+- The pre-migration backup archive is now flushed and fsynced, along with its
+  directory entry, before it is verified. The buffered tail of the archive was
+  written when the writer was dropped, which discarded any error such as a full
+  disk, and the file was never put on stable storage, while the verify pass
+  re-read it from the page cache and cleared a destructive in-place migration
+  to run. ([#1525](https://github.com/akitaonrails/ai-memory/pull/1525))
+- Wiki commits no longer stage a write that is still in flight. A batch write
+  keeps one `.ai-memory-tmp.` staging file per page on disk across an await,
+  and auto-commit does not hold the mutation lock, so a checkpoint landing in
+  that window committed page bodies that were never installed, and a batch
+  that then failed left the rolled-back content in wiki history. A page parked
+  under `.ai-memory-delete.` during a delete, or under
+  `.ai-memory-tmp.move-session.` during a session move, is left out the same
+  way. ([#1524](https://github.com/akitaonrails/ai-memory/pull/1524))
+- The `/hook` ingress now skips a leading UTF-8 byte-order mark, as the native
+  hook client already did. Some PowerShell pipelines add that marker when
+  writing to a native process, and the POSIX shell hook bundle forwards the
+  payload byte for byte, so such an event was answered with 400 and lost
+  without notice. `ai-memory-relay enqueue --file` skips the marker too.
+  ([#1523](https://github.com/akitaonrails/ai-memory/pull/1523))
+- The POSIX shell hook bundle, the PowerShell bundle under PowerShell 7 and the
+  generated TypeScript integrations under Bun (OpenCode) no longer send
+  their requests through an environment proxy (`http_proxy`, `HTTPS_PROXY`,
+  `ALL_PROXY`), as the native hook client and the bridge already did. In a
+  sandbox that exports a proxy with an empty `NO_PROXY`, the filtering proxy
+  answered the loopback event POST with a 4xx, which the hooks treat as a
+  permanent rejection, so the observation was dropped instead of spooled and a
+  resuming session got no handoff. A server reachable only through a forward
+  proxy needs a direct route; see `docs/https-via-proxy.md`.
+  ([#1517](https://github.com/akitaonrails/ai-memory/pull/1517))
 
 - `mcp-bridge` and the `setup` self-check no longer send requests to the
   server through `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`, as the hooks
@@ -338,6 +442,14 @@ version in [`docs/changelog/`](docs/changelog/):
   Windows never expands. A PATH an earlier install already rewrote keeps its
   expanded entries.
   ([#1509](https://github.com/akitaonrails/ai-memory/issues/1509))
+
+- A tool hook for an MCP tool now keeps the tool's identity. Claude Code, Codex
+  and Hermes Agent name such a call `mcp__<server>__<tool>`; it stays in the
+  `unknown` family, so its arguments and result are still never stored, but the
+  observation now adds `mcp_server` and `mcp_tool` lines when the name is at
+  most 64 ASCII letters, digits, `_` or `-`. Before, a session's MCP calls
+  were recorded only as `tool unknown`.
+  ([#1522](https://github.com/akitaonrails/ai-memory/issues/1522))
 
 ## [3.1.2] - 2026-10-20
 
@@ -1852,7 +1964,8 @@ version in [`docs/changelog/`](docs/changelog/):
   session-timeline owner rule. Another operator's observations still rank
   shared session pages.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.1.2...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.0...HEAD
+[3.2.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.0
 [3.1.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.2
 [3.1.1]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.1
 [3.1.0]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.1.0

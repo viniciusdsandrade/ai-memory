@@ -280,7 +280,9 @@ scope names, never captured text, and points at
 sends `profile_digest=0` after the first, which also stops the notice.
 `memory_briefing` lists the same ordering as `recent_sessions`, and
 `memory_handoff_list` names the session as `newer_unended_session` when it is
-newer than every open handoff.
+newer than every open handoff. `memory_read_session_observations` without a
+`session_id` reads from the same ordering: the newest other session in the
+caller session's cwd, then the newest other session in the scope.
 
 **Session-start project brief:** when the project's marker sets
 `[briefing] inject_on_session_start`, `GET /handoff` appends a brief of the
@@ -537,7 +539,9 @@ prunable rather than only after it ages in place.
 * `<data_dir>/wiki/`: markdown source of truth. Owned by a `git2`
   repo so every consolidation pass + every session-end produces a
   durable commit. Editable by hand in Obsidian / vim; the watcher
-  reconciles outside edits.
+  reconciles outside edits. A checkpoint never stages a hook event ledger or
+  a write still in flight (an `.ai-memory-tmp.` staging file or an
+  `.ai-memory-delete.` parked page).
 * `<data_dir>/db/memory.sqlite`: derived index. WAL mode. One
   writer actor owns the writer `Connection`; reads go through a
   cloneable read-only pool.
@@ -725,7 +729,7 @@ does not need to ride on the public protocol change.
 | `memory_query` | read-only | FTS5 + entity-match + graph RRF + optional vector RRF + observation-evidence stream (on by default) search, followed by bounded kind/tier/pinned/tag authority adjustment and raw fallback. Bumps access counters for page hits. Defaults to the current project; single-project calls (project implicit or named with `workspace`+`project`) also union the reserved `_global` preferences scope as `global_scope_hits`, and only an explicit multi-`scopes` set opts out (#930); `scopes` searches named sibling projects; `global=true` searches every project at once (each hit annotated with its workspace + project). With `AI_MEMORY_RERANKER=llm`, project/scopes candidate pools are fused before at most one final LLM relevance pass; query/title/snippet data is bounded and JSON-encoded, and any timeout, provider error, invalid/incomplete score set, or four-call concurrency saturation preserves the adjusted order. The distinct `global=true` FTS-only ranker and supplemental global-preference hits are not reranked. `explain=true` attaches per-hit `score_details` (per-stream ranks, matched entities, raw FTS/cosine/entity inverse-frequency scores, the matched observation ids when the observation stream voted, RRF contributions, graph provenance including the typed edge kind (`causes`/`fixes`/`contradicts`) a neighbour was reached by, the page's evidence count, authority multiplier, and optional rerank score) to project/scopes hits plus a top-level `streams_active` list and a `timings` object with each stream's wall time in milliseconds (`fts_ms`, `entity_ms`, `vector_ms` for the stored-vector scans, `graph_ms`, `observation_ms`, `rerank_ms`; a stream that did not run is left out, and `scopes` searches sum per stream). Timings are read only on an explained query; the normal path takes no clock reading for them. The global FTS-only ranker reports its active stream and `fts_ms` without per-hit details; `as_of` reports no timings. `include_expired=true` also returns TTL-expired pages. `include_superseded=true` also returns superseded (non-latest) page versions across the FTS/entity/vector/graph streams, each hit labelled `superseded: true` (the current version is never marked); default-off is byte-identical to the latest-only behaviour, and `global=true` / `as_of` are unaffected. `pin_first=true` prepends the project's bounded pinned latest pages (`ReaderPool::list_pinned_pages`, cap 10) ahead of the fused hits, deduped by page id (a pinned page that also matches appears once, marked `pinned: true`) and re-truncated to the requested limit; it applies to single-project searches (default or `workspace`+`project`), is ignored on `scopes`/`global`/`as_of`, and default-off is byte-identical. `answer=true` (opt-in, off by default) additionally synthesizes a cited natural-language answer over the top hits via the configured LLM provider (`complete_structured`, JSON-schema `{ answer, citations }`), attached as `answer: { text, citations }`; with no provider configured it returns the hits plus an `answer_unavailable` note instead of erroring, and with `answer` unset/`false` no provider is accessed and the response is byte-identical (invariant #13). It applies to the normal single-project/`scopes` path; `global`/`as_of` ignore it. Answer quality is not yet eval-validated. An optional `reasoning` tier (`minimal` (default) / `low` / `medium` / `high` / `max`) tunes the synthesis effort: `ChatRequest` carries no per-request reasoning field (the provider-level `reasoning_effort` is fixed at construction from config), so the tier maps to a per-tier max-token budget scaled off the path's base (answer base 2 000; `minimal` = 1x = byte-identical, `low` 1.5x, `medium` 2x, `high` 3x, `max` 4x). The tier is inert unless the `answer` LLM path runs (invariant #13); an unknown value is rejected by the schema (invariant #7). Optional `kind`, `tag`, `tier` and `path_prefix` filters narrow candidates before ranking, on every stream including the CJK substring search. |
 | `memory_recent` | read-only | Most-recently-updated `is_latest=1` pages. |
 | `memory_read_page` | read-only | Fetch the FULL body of a single wiki page by `path` or by top FTS5 hit for a `query`; optional `workspace` + `project` targets a named sibling workspace/project. Use when an agent needs more than the 24-word snippets from `memory_query`. `include_related=true` also walks the link graph outward from the page (bounded BFS reusing the `page_links` primitive per node: default 1 hop, hard cap 3, global visited set for dedup/cycle-safety, total-node cap 50, cross-project aware) and returns a `related` array of reachable pages, each labelled with its `depth` (hop distance) and `direction` (`link`/`backlink`); default-off is byte-identical (no `related` field). The response carries the page's current version as `page_id`, the value compare-and-write calls pass back. A page whose `expires_at` TTL has passed is still returned and carries `expired: true`; a live page's response has no such field. |
-| `memory_read_session_observations` | read-only | Page through ONE session's raw hook observations (`ObservationRecord` with full sanitized body, capped per row by `body_max_chars`), restricted to the rows that landed in the resolved scope and to sessions the caller may see; `total` and `elided_other_scope` report the in-scope count and the rows the session left in another project. `session_id` omitted reads the latest completed visible session. |
+| `memory_read_session_observations` | read-only | Page through ONE session's raw hook observations (`ObservationRecord` with full sanitized body, capped per row by `body_max_chars`), restricted to the rows that landed in the resolved scope and to sessions the caller may see; `total` and `elided_other_scope` report the in-scope count and the rows the session left in another project. `session_id` omitted reads the visible session with the newest captured work other than the caller's own, ended or cut off (`ReaderPool::recent_session_activity` over 30 days, preferring the caller session's cwd), else the latest completed visible session. |
 | `memory_status` | read-only | Counts, paths, version, plus the `scope` that answered: `workspace`, `project`, and `resolved_by` (`explicit`, `session`, `shared_slot`, `startup_seed`, `default`, `default_after_mismatch`). Unscoped reads resolved by `startup_seed` or `default_after_mismatch` also log a server warning. |
 | `memory_briefing` | read-only | Structured counts/activity/rules/slots/recent snapshot. Project-scoped snapshots also carry a bounded `pinned` list (up to 10) of the project's pinned latest pages (`pinned = 1`, newest first) as standing SessionStart hot-context, distinct from `slots`, which is keyed by the `_slots/` path prefix; empty and omitted from JSON when the project has no pins, so the default shape is unchanged. Opt-in `settled_first: true` leads with up to 8 of the project's highest-standing `rule`/`decision` pages, ordered by evidence count then recency; off by default. `scope` names the workspace/project briefed and `resolved_by` how it was chosen. |
 | `memory_explore` | read-only | LLM prose digest over the briefing snapshot, degrading to JSON without a provider. An optional `reasoning` tier (`minimal` (default) / `low` / `medium` / `high` / `max`) scales the digest's max-token budget off its base (16 000; same 1x/1.5x/2x/3x/4x mapping as `memory_query`); inert on the no-provider briefing-only path, and `minimal` is byte-identical. |
@@ -1027,7 +1031,11 @@ that touch the relevant area.
    in every domain row from day one. (basic-memory #783 / #834.)
 5. **Hooks are fire-and-forget.** Hook scripts hard-timeout at
    ≤200 ms; server returns 202 immediately or 429 when saturated.
-   (agentmemory #221 / #143.)
+   (agentmemory #221 / #143.) The router's filesystem probes of an event's
+   cwd (git discovery, canonicalization) never run on an async worker: they
+   go through `CwdProbes`, a blocking-pool path with four permits and a
+   2-second deadline, so a stuck `open()` (macOS privacy controls, a dead
+   network mount) fails that event instead of stalling the server (#1514).
 6. **Privacy strip is a typed boundary.** `Sanitized<NewObservation>`
    has no other constructor than `sanitize()`. (design-decisions §14.)
    The opt-in assistant/Stop excerpt (#196) enters through this same
@@ -1055,6 +1063,12 @@ that touch the relevant area.
     [design-windows-ci.md](design-windows-ci.md#windows-transient-file-errors).
     New file-I/O code with the same race follows the same pattern, with a
     test that injects the error so it also runs off Windows.
+    The wiki's `.git` gets the same durability from libgit2: every handle
+    ai-memory opens carries `core.fsyncObjectFiles = true` from
+    `.git/ai-memory.gitconfig`, a file the git CLI never reads, so objects
+    and refs are synced before their rename, and startup logs an `ERROR` when
+    `HEAD` does not resolve to a readable commit (the repair is in
+    [lifecycle-ops.md](lifecycle-ops.md#wiki-git-history-unreadable-after-a-crash)).
 11. **Absolute canonical data dir** default; logged loudly on
     startup. (agentmemory #303.)
 12. **No global singletons / `lazy_static` configs.** All deps
