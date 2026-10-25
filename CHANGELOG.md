@@ -11,6 +11,17 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+## [3.2.5] - 2026-10-25
+
+### Fixed
+
+- `ai-memory backup` and `ai-memory backup-agents` now carry a size that
+  would round to `1024.00` of the current unit into the next one. A backup
+  of 1 MiB - 5 bytes was printed as `1024.00 KiB` (#1705).
+- The OKF migration dialog now carries an archive size that would round to
+  `1024.0` of the current unit into the next one. An archive of 1 MB - 51
+  bytes was printed as `1024.0 KB` (#1706).
+
 ## [3.2.4] - 2026-10-25
 
 ### Security
@@ -2777,7 +2788,8 @@ version in [`docs/changelog/`](docs/changelog/):
   session-timeline owner rule. Another operator's observations still rank
   shared session pages.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.4...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.5...HEAD
+[3.2.5]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.5
 [3.2.4]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.4
 [3.2.3]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.3
 [3.2.2]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.2
