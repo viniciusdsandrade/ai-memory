@@ -11,6 +11,42 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+### Added
+
+- `GET /admin/status` and `ai-memory status --json` now carry a
+  `consolidation` block: the queue counts plus up to 20 `failed_sessions`
+  (`session_id`, `attempts`, `failed_at_us`, scrubbed `last_error`), newest
+  first. A consolidation run that gives up after its retries now has a
+  machine-readable record with the session ids needed to re-run it, instead of
+  only a journal line and the `/health` panel's count — which also resets with
+  the process. The web health panel's own view stays counts-only, and an older
+  server's status shape is unchanged (#1692).
+
+### Fixed
+
+- Codex's own memory-writing agent no longer appears as captured sessions.
+  Codex runs a background "memory writing agent" from `$CODEX_HOME/memories`
+  (the default `~/.codex/memories`) to consolidate its memory; the hooks
+  captured each run as a normal session, so one project of 78 sessions and
+  ~2,600 observations existed for work nobody did, and it returned with the
+  next run after a purge. Those events are now accepted and stored nowhere,
+  recognized by the directory (any `…/.codex/memories`) or by the agent's
+  `## Memory Writing Agent` prompt header, and transcript imports
+  (`backfill`, the `run` ledger, `recover`) skip them for the same reason
+  (#1674).
+
+- `memory_query(answer=true)` now validates model-generated citation paths
+  against the snippets supplied in that request. Unknown paths and paths
+  shared by distinct page versions withhold the answer, while retrieval hits
+  remain available with an `answer_unavailable` note. Repeated citations are
+  deduplicated in model order; the default query path makes no added calls
+  (#1682).
+- `ai-memory write-page` and `restore-page` now print the last eight
+  characters of the page id instead of the first eight. Page ids are UUIDv7,
+  so the first eight are a timestamp prefix that every page written within
+  about a minute shares, and the printed `page_id` was the same for all of
+  them. The web UI already shortens ids this way (#1693).
+
 ## [3.2.3] - 2026-10-24
 
 ### Changed
