@@ -11,6 +11,70 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+## [3.2.7] - 2026-10-26
+
+### Fixed
+
+- Fixed `ai-memory doctor` native memory inspection omitting Antigravity CLI
+  and using a Claude-only synthetic probe (#1745).
+- Fixed native hook backlogs repeatedly missing their 250 ms mid-session
+  delivery window on loaded macOS hosts. Threshold catch-up now launches the
+  long-budget detached drainer, and POSIX fallback hooks use macOS's real
+  Application Support data directory for spool and auth state (#1744).
+
+## [3.2.6] - 2026-10-26
+
+### Fixed
+
+- Fixed `ai-memory-wikisync` scope-adoption warnings containing long runs of
+  spaces where source formatting had leaked into the displayed sentence.
+- Fixed opt-in cold-page compaction replacing a newer user edit with the stale
+  episodic body and metadata it had selected earlier. The sweep now writes the
+  whole compaction batch only when every selected page version is still latest;
+  one changed page leaves the entire batch untouched for the next sweep (#1721).
+- Automatic backfill no longer flashes a console window for each Git probe on
+  Windows. Git children inherit `CREATE_NO_WINDOW`, and a run resolves each
+  harness's session directory only once (#1727).
+- The OpenCode version probe now waits up to 10 seconds instead of 2, allowing
+  cold-start executable scanning and loaded hosts without treating a working
+  installation as hung (#1718).
+- Fixed agentmemory imports resuming over destination body edits that retained
+  the original attribution footer. A resume now requires the complete body to
+  match a planned version before using its page id for the next conditional
+  write; identical imports still resume without duplicate versions (#1726).
+- Refused restore archives whose `db/memory.sqlite` snapshot is absent,
+  empty, or has no applied ai-memory migration history before replacing any
+  live data. Opening those sources previously initialized a new empty store
+  and let `restore --force` discard the previous database and wiki (#923).
+- Fixed `restore-agents` skipping files whose contents matched the archive
+  but whose Unix permissions differed, leaving executable plugins without
+  their execute bits. Permission-only changes now appear in the preview and
+  require `--apply --force`, with the usual backup copy (#962).
+- Fixed a saturated hook server blocking delivery to other servers sharing
+  the native spool. HTTP 429 now pauses only that endpoint for the current
+  drain pass, preserving unacknowledged events and their retry budget across
+  batched, fallback and retry delivery paths (#1283).
+- Fixed `ai-memory-wikisync sync` overwriting a concurrent server edit when
+  importing a repository edit. Edited files now use one full page read for
+  classification and the write precondition; a second read after a 304 could
+  previously accept the newer version without checking for a conflict (#986).
+- Restored affirmative profile preferences about tools, browsers and MCP.
+  The capability-ban filter also discarded statements such as "Always use
+  tools to verify facts"; it now requires negative or disabling wording.
+  Capability bans still need explicit cross-project scope (#1678).
+- Fixed `restore-page` accepting an explicitly empty `--workspace` or
+  `--project` and restoring a page in the current checkout's scope instead.
+  Empty and whitespace-only values are now refused before any request; omit
+  the flags to intentionally use the current scope, extending the guard
+  already used by purge commands (#1675).
+- `ai-memory-wikisync` records the server, workspace and project its export
+  state came from and refuses to reuse a destination for another scope before
+  writing anything. Reusing one made every page of the previous project read
+  as "deleted on the server", so `sync --propagate-deletes --apply` removed
+  those files and emptied the state. `--adopt-scope` is the explicit way to
+  take a destination over, and a baseline written before the field existed is
+  adopted on its first run with a warning (#1708).
+
 ## [3.2.5] - 2026-10-25
 
 ### Fixed
@@ -2788,7 +2852,9 @@ version in [`docs/changelog/`](docs/changelog/):
   session-timeline owner rule. Another operator's observations still rank
   shared session pages.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.5...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.7...HEAD
+[3.2.7]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.7
+[3.2.6]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.6
 [3.2.5]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.5
 [3.2.4]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.4
 [3.2.3]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.3

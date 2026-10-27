@@ -52,6 +52,10 @@ ai-memory-wikisync sync ... --apply --prefer repo   # or --prefer server
 ai-memory-wikisync sync ... --apply --propagate-deletes
 ```
 
+- The state file records the server, workspace and project it came from. If
+  you point the same `--dest` at a different scope, the run refuses before
+  writing (a foreign baseline would make that project's pages look deleted);
+  pass `--adopt-scope` to discard the baseline and export fresh.
 - `plan` never writes, not even the state file.
 - `export --apply` writes/updates markdown files under `--dest` and prints
   the `git add` / `git commit` / `git push` commands you may run yourself.
@@ -169,7 +173,10 @@ Safety rules:
   import; the refusal names the keys. Such pages still export.
 - **Every write is conditional.** Each import carries the page version the
   plan classified (`expected_page_id`), or `create_only` for a new page, and
-  each delete carries the version too. A page that changes on the server
+  each delete carries the version too. An edited repository file triggers a
+  full page read, so classification and the write precondition use the same
+  server version. Unchanged files still use ETag revalidation. A page that
+  changes on the server
   after it was classified is refused by the server, reported as "changed
   during this run", and left with its old state for the next run; the other
   pages still sync, and the run exits non-zero. A server without these

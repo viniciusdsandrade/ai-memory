@@ -325,7 +325,8 @@ pub async fn run(args: &SyncArgs, mode: SyncMode) -> Result<Outcome> {
     };
     let dest_root = sync::resolve_dest(&run_args.dest, fs_mode)?;
     let stateless_check = mode == SyncMode::Check && !state::state_path(&dest_root).exists();
-    let old_state = state::load(&dest_root)?;
+    let scope = state::SyncScope::of(&run_args.server, &run_args.workspace, &run_args.project);
+    let old_state = sync::baseline_for(state::load(&dest_root)?, &scope, run_args.adopt_scope)?;
     let api = ApiClient::new(&run_args.server, run_args.token.clone())?;
 
     let plan = build_plan(
@@ -464,9 +465,15 @@ async fn build_plan(
         let mut etag = None;
         let mut rendered = None;
         if on_server.contains(&path) {
-            let hint = disk
-                .as_ref()
-                .and(base.and_then(|base| base.etag.as_deref()));
+            // An edited file needs metadata and a version id from the same
+            // read we classify. Following a 304 with a full read could pick
+            // up a concurrent edit and import over it without a conflict.
+            let hint = base
+                .filter(|base| {
+                    disk.as_ref()
+                        .is_some_and(|disk| state::sha256_hex(disk) == base.hash)
+                })
+                .and_then(|base| base.etag.as_deref());
             let read = api
                 .read_page(&run_args.workspace, &run_args.project, &path, hint)
                 .await?;
@@ -730,6 +737,11 @@ async fn apply_plan(
     plan: Plan,
 ) -> Result<Applied> {
     let mut new_state = old_state.clone();
+    new_state.scope = Some(state::SyncScope::of(
+        &args.server,
+        &args.workspace,
+        &args.project,
+    ));
     new_state.pages.extend(plan.adopted);
     for path in &plan.forget {
         new_state.pages.remove(path);
