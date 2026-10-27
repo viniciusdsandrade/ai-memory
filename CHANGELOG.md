@@ -11,8 +11,13 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ## [Unreleased]
 
+## [3.2.8] - 2026-10-27
+
 ### Fixed
 
+- `ai-memory restore-page` now refuses empty or whitespace-only `--path` and
+  `--from` values before resolving scope, authentication, or sending a request
+  to the server (#1764).
 - `ai-memory message` subcommands (`send`, `pop`, and `cancel`) now refuse
   explicitly empty scope flags and targets before reading stdin or sending
   any request to the server (#1761).
@@ -2865,7 +2870,8 @@ version in [`docs/changelog/`](docs/changelog/):
   session-timeline owner rule. Another operator's observations still rank
   shared session pages.
 
-[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.7...HEAD
+[Unreleased]: https://github.com/akitaonrails/ai-memory/compare/v3.2.8...HEAD
+[3.2.8]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.8
 [3.2.7]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.7
 [3.2.6]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.6
 [3.2.5]: https://github.com/akitaonrails/ai-memory/releases/tag/v3.2.5
