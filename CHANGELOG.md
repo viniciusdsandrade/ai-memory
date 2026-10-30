@@ -13,6 +13,14 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Session start no longer hangs on large projects. Choosing the unfinished
+  session for the recovery snapshot re-ran its per-session checks for every
+  observation in the project. On a store without SQLite statistics, each check
+  rescanned the whole project, so `GET /handoff` ran for minutes and the hook
+  gave up with no brief or handoff. Each session is now checked once through
+  the session index, and the project's handoffs are read once: a synthetic
+  project with 139k observations answers in milliseconds instead of running
+  past two minutes (#1879).
 - Project search links now use the project's current stored name after
   resolving a canonical or legacy key. Results, breadcrumbs, and the scope
   selector stay on that project without renaming it (#1875).
