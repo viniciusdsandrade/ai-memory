@@ -889,6 +889,23 @@ pub(crate) fn owner_filter_for(
     )
 }
 
+/// The owner filter for reading sessions and the token usage recorded on them.
+///
+/// Root is the operator: it already lists every handoff with `all_owners`, and
+/// the dashboard counts every user's sessions. Filtering root's drilldowns by
+/// its own identity hid the sessions those counts promise (#1867). Every other
+/// caller keeps [`owner_filter_for`]: their own sessions plus shared ones.
+pub(crate) fn session_owner_filter_for(
+    actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
+) -> ai_memory_core::OwnerFilter {
+    if matches!(auth, Some(axum::Extension(ai_memory_core::AuthLevel::Root))) {
+        ai_memory_core::OwnerFilter::Any
+    } else {
+        owner_filter_for(actor)
+    }
+}
+
 /// May this request read the prompt-derived body of a handoff?
 ///
 /// Three ways to qualify: an authenticated caller resolved to an identity and
@@ -1178,6 +1195,7 @@ async fn sessions_handler(
     State(state): State<Arc<WebState>>,
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     Path((workspace, project)): Path<(String, String)>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Response, Response> {
@@ -1188,7 +1206,7 @@ async fn sessions_handler(
         .sessions_for_scope(
             workspace_id,
             project_id,
-            owner_filter_for(actor),
+            session_owner_filter_for(actor, auth),
             query.include_open,
             query.limit.clamp(1, SESSION_LIST_MAX_LIMIT),
             query.offset,
@@ -1204,6 +1222,7 @@ async fn session_observations_handler(
     State(state): State<Arc<WebState>>,
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     Path((workspace, project, session_id)): Path<(String, String, String)>,
     Query(query): Query<SessionObservationsQuery>,
 ) -> Result<Response, Response> {
@@ -1263,7 +1282,7 @@ async fn session_observations_handler(
             workspace_id,
             project_id,
             session_id,
-            owner_filter_for(actor),
+            session_owner_filter_for(actor, auth),
         )
         .await
         .map_err(internal_error)?

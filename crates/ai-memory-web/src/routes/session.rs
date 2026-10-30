@@ -19,7 +19,7 @@ use serde::Deserialize;
 
 use super::api::{
     SESSION_OBSERVATIONS_DEFAULT_BODY_CHARS, SESSION_OBSERVATIONS_MAX_LIMIT, cap_body,
-    owner_filter_for,
+    session_owner_filter_for,
 };
 use crate::state::WebState;
 use crate::templates::{SessionObservationRow, SessionView, humanize, project_href, session_href};
@@ -49,9 +49,11 @@ pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     Path((workspace, project, raw_session)): Path<(String, String, String)>,
     Query(query): Query<SessionQuery>,
 ) -> Response {
+    let owner = session_owner_filter_for(actor, auth);
     let viewer = viewer.map(|axum::Extension(viewer)| viewer.user());
     let scope = match super::resolve_read_scope(&state, viewer, &workspace, &project).await {
         Ok(scope) => scope,
@@ -72,7 +74,7 @@ pub(crate) async fn handler(
             scope.workspace_id,
             scope.project_id,
             session_id,
-            owner_filter_for(actor.clone()),
+            owner.clone(),
         )
         .await
     {
@@ -146,7 +148,7 @@ pub(crate) async fn handler(
         .token_usage_report_page(
             scope.workspace_id,
             scope.project_id,
-            owner_filter_for(actor),
+            owner,
             Some(session_id),
             calls_query,
         )

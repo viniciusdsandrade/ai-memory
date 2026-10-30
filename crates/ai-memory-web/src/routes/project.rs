@@ -50,6 +50,7 @@ pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     Path((workspace, project)): Path<(String, String)>,
     Query(query): Query<crate::operations::UsageQuery>,
 ) -> Response {
@@ -58,7 +59,7 @@ pub(crate) async fn handler(
         Ok(authorized) => authorized,
         Err(refusal) => return super::page::refusal_response(&refusal),
     };
-    let owner = super::api::owner_filter_for(actor);
+    let owner = super::api::session_owner_filter_for(actor, auth);
     render(
         &state, workspace, project, viewer_id, authorized, owner, query,
     )

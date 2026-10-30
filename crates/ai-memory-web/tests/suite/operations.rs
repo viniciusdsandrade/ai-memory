@@ -1,11 +1,11 @@
 //! Browser writes, directed delivery and scoped operational views.
 
 use ai_memory_core::{
-    AgentKind, AuthLevel, AuthorizedViewer, MessageBox, NewSession, NewUser, OwnerFilter,
-    SessionId, TokenCall, UserRole,
+    ActorContext, AgentKind, AuthLevel, AuthorizedViewer, MessageBox, NewSession, NewUser,
+    OwnerFilter, SessionId, TokenCall, UserRole,
 };
 use ai_memory_store::{GrantLevel, Store};
-use ai_memory_web::router;
+use ai_memory_web::{api_router, router};
 use ai_memory_wiki::Wiki;
 use axum::{
     body::Body,
@@ -1193,6 +1193,128 @@ async fn operations_agent_aggregates_and_drilldowns_apply_ownership_before_total
         .await
         .unwrap();
     assert_eq!(foreign.call_count, 0);
+}
+
+#[tokio::test]
+async fn operations_root_drilldowns_reach_every_users_sessions_and_users_stay_owned() {
+    // The dashboard counts every user's sessions; root's drilldowns must reach
+    // them (#1867), while a user still sees only their own and shared ones.
+    let (_tmp, store, wiki, ws, project, shared) = fixture().await;
+    let mut users = Vec::new();
+    for name in ["alice", "bob"] {
+        let id = store
+            .writer
+            .create_human_user(
+                NewUser {
+                    username: name.into(),
+                    name: None,
+                    email: None,
+                },
+                UserRole::User,
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let sid = SessionId::new();
+        store
+            .writer
+            .begin_session(NewSession {
+                id: sid,
+                workspace_id: ws,
+                project_id: project,
+                agent_kind: AgentKind::Codex,
+                cwd: None,
+                actor_user: Some(ai_memory_core::IdentityKey::User(name.into()).storage_key()),
+                occurred_at: None,
+            })
+            .await
+            .unwrap();
+        store.writer.end_session(sid, None).await.unwrap();
+        users.push((name, id, sid));
+    }
+    let (_, alice, alice_session) = users[0];
+    let (_, _, bob_session) = users[1];
+    let as_alice = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .extension(AuthLevel::User)
+            .extension(AuthorizedViewer(alice))
+            .extension(ActorContext {
+                user: Some("alice".into()),
+                ..ActorContext::anonymous()
+            })
+            .body(Body::empty())
+            .unwrap()
+    };
+    let as_root = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .extension(AuthLevel::Root)
+            .extension(ActorContext {
+                user: Some("admin".into()),
+                ..ActorContext::anonymous()
+            })
+            .body(Body::empty())
+            .unwrap()
+    };
+    let app = router(store.reader.clone(), wiki.clone());
+    let api = api_router(store.reader.clone(), wiki);
+
+    for uri in ["/w/team/app/agents/codex", "/w/team/app?tab=sessions"] {
+        let user_view = text(app.clone().oneshot(as_alice(uri)).await.unwrap()).await;
+        assert!(user_view.contains(&alice_session.to_string()), "{uri}");
+        assert!(user_view.contains(&shared.to_string()), "{uri}");
+        assert!(
+            !user_view.contains(&bob_session.to_string()),
+            "{uri}: foreign session"
+        );
+        let root_view = text(app.clone().oneshot(as_root(uri)).await.unwrap()).await;
+        for sid in [alice_session, bob_session, shared] {
+            assert!(
+                root_view.contains(&sid.to_string()),
+                "{uri}: root misses {sid}"
+            );
+        }
+    }
+
+    let bob_page = format!("/w/team/app/s/{bob_session}");
+    assert_eq!(
+        app.clone()
+            .oneshot(as_alice(&bob_page))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.oneshot(as_root(&bob_page)).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let list = "/workspaces/team/projects/app/sessions?include_open=true";
+    let user_list = text(api.clone().oneshot(as_alice(list)).await.unwrap()).await;
+    assert!(user_list.contains(&alice_session.to_string()));
+    assert!(!user_list.contains(&bob_session.to_string()));
+    let root_list = text(api.clone().oneshot(as_root(list)).await.unwrap()).await;
+    assert!(root_list.contains(&bob_session.to_string()));
+    let bob_observations =
+        format!("/workspaces/team/projects/app/sessions/{bob_session}/observations");
+    assert_eq!(
+        api.clone()
+            .oneshot(as_alice(&bob_observations))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        api.oneshot(as_root(&bob_observations))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

@@ -26,6 +26,7 @@ pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     viewer: Option<axum::Extension<ai_memory_core::AuthorizedViewer>>,
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
+    auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
     Path((workspace, project, raw)): Path<(String, String, String)>,
     Query(query): Query<AgentQuery>,
 ) -> Response {
@@ -40,7 +41,7 @@ pub(crate) async fn handler(
             Ok(scope) => scope,
             Err(e) => return super::page::refusal_response(&e),
         };
-    let owner = super::api::owner_filter_for(actor);
+    let owner = super::api::session_owner_filter_for(actor, auth);
     let rows = match state
         .reader
         .agent_usage(scope.workspace_id, scope.project_id, owner.clone())

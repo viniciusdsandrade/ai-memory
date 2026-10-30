@@ -13,10 +13,48 @@ version in [`docs/changelog/`](docs/changelog/):
 
 ### Fixed
 
+- Project search links now use the project's current stored name after
+  resolving a canonical or legacy key. Results, breadcrumbs, and the scope
+  selector stay on that project without renaming it (#1875).
+- The CJK index backfill (V87) now also repairs a page or observation stored at
+  rowid `i64::MIN`. Its exclusive initial cursor skipped that one valid SQLite
+  rowid; the inclusive cursor now covers both rowid extremes (#1873).
+- Bounded the SQLite read pool to four in-flight reads. Bursts of concurrent
+  work now wait for a connection asynchronously instead of creating hundreds
+  of blocking threads and long-lived read transactions that starve the server
+  and hold back WAL checkpoints (#1866).
+- Refreshed existing ai-memory-owned OpenCode, OpenCode 2, OMP, Pi, and
+  OpenClaw generated TypeScript integrations during `ai-memory upgrade` using
+  the newly installed binary's templates, while leaving absent and user-owned
+  installs untouched (#1869).
+- The web UI's root operator now sees every user's sessions in a project's
+  Sessions, Agents and Token usage tabs, on each agent's page and on each
+  session's page, and so do the `/api/v1` session list and observations
+  routes. The dashboard counted every user's sessions while these drilldowns
+  listed only root's own, so on a shared server most counted sessions could
+  not be opened. Other users still see only their own sessions plus shared
+  ones (#1867).
+
+- `backfill --session <id>` now finds an explicitly named native session beyond
+  the newest 200-session listing, instead of reporting a successful empty import.
+  Exact lookups retain the adapter's checkout and top-level-session checks;
+  automatic enumeration remains bounded (#1874).
+- Excluded Codex's generated approval-review transcripts and background
+  suggestion prompts from transcript backfill and profile harvesting, and
+  kept a hand-reworded profile page attached to its ledger topic even when a
+  public page write drops the harvester metadata, preventing `-2` duplicates
+  (#1863).
+- Matched Claude Code's UTF-16 project-folder encoding for astral characters
+  and its hashed 200-character limit, so transcript discovery and token-usage
+  backfill find sessions from emoji and very long checkout paths (#1864).
 - Claude Code backfill-close now finds transcripts for project paths that
   contain dots, underscores, spaces, or non-ASCII characters, so an abandoned
   session's token usage is retained when its synthetic `session-end` is
   captured (#1858).
+- Kept the trailing `#` of `memory_patch_page` headings such as `## C#`
+  unless a space or tab comes before it, as CommonMark does. They were
+  listed and matched without it, so naming one as written failed, `## C`
+  and `## C#` collided, and `add_section` wrote `## F` for `## F#` (#1859).
 - Documented four keys added in 3.3.0 that the shipped `config.default.toml`
   and `docs/config-properties.md` left out: `rerank_timeout_secs`,
   `[run] exit_prompt`, `[query_answer] max_context_tokens` and
