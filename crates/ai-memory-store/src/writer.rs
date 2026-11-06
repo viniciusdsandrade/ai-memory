@@ -289,7 +289,7 @@ pub(crate) enum WriteCmd {
         summary_page_id: Option<PageId>,
         handoff: NewHandoff,
         occurred_at: Option<i64>,
-        reply: oneshot::Sender<StoreResult<HandoffId>>,
+        reply: oneshot::Sender<StoreResult<Option<HandoffId>>>,
     },
     EndAdmittedLifecycleOnlySession {
         admitted: AdmittedSession,
@@ -342,6 +342,10 @@ pub(crate) enum WriteCmd {
         reply: oneshot::Sender<StoreResult<usize>>,
     },
     InsertHandoff {
+        handoff: NewHandoff,
+        reply: oneshot::Sender<StoreResult<HandoffId>>,
+    },
+    InsertManualHandoff {
         handoff: NewHandoff,
         reply: oneshot::Sender<StoreResult<HandoffId>>,
     },
@@ -439,6 +443,25 @@ pub(crate) enum WriteCmd {
         author_id: Option<ai_memory_core::UserId>,
         params: crate::decay::DecayParams,
         reply: oneshot::Sender<StoreResult<Option<(PageId, f64)>>>,
+    },
+    /// Record one implicit (query → page) association (#1941). The op
+    /// normalizes and hashes the query itself so every writer of a row
+    /// derives the same key.
+    RecordQuerySignal {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        page_id: PageId,
+        query_text: String,
+        session: Option<String>,
+        reply: oneshot::Sender<StoreResult<u32>>,
+    },
+    /// Drop one implicit (query → page) association (#1941).
+    ForgetQuerySignal {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        page_id: PageId,
+        query_text: String,
+        reply: oneshot::Sender<StoreResult<bool>>,
     },
     SoftDeleteForDecayIfLatest {
         workspace_id: WorkspaceId,
@@ -639,6 +662,14 @@ pub(crate) enum WriteCmd {
     /// Rename a project's `name` column without moving any files (the wiki
     /// is flat on disk). Fails with [`crate::error::StoreError::ProjectNameTaken`]
     /// when `new_name` is already used in the same workspace.
+    AdoptProjectIdentity {
+        workspace_id: WorkspaceId,
+        into: ProjectId,
+        from: ProjectId,
+        archive_name: Option<String>,
+        author_id: Option<ai_memory_core::UserId>,
+        reply: oneshot::Sender<StoreResult<ops::AdoptedProjectIdentity>>,
+    },
     RenameProject {
         workspace_id: WorkspaceId,
         project_id: ProjectId,
@@ -852,6 +883,7 @@ pub(crate) enum WriteCmd {
     },
     LinkOrAdoptManagedRunSession {
         input: LinkOrAdoptManagedRunSession,
+        boundary: crate::workstream::ClaudeSessionBoundary,
         reply: oneshot::Sender<StoreResult<ManagedRunSessionLink>>,
     },
     LinkManagedRunSessionInScope {
@@ -1639,8 +1671,10 @@ impl WriterHandle {
 
     /// Close every session, in every scope, open with no activity since
     /// before `cutoff_us` (safety net). No usage, no
-    /// consolidation — see [`ops::close_abandoned_sessions`] for why.
-    /// Returns the number of sessions closed.
+    /// consolidation — see [`ops::close_abandoned_sessions`] for why. Each
+    /// closed session also gets a parked auto-improvement claim so the
+    /// sweep never queues an LLM review. Returns the number of sessions
+    /// closed.
     ///
     /// # Errors
     /// Propagates store failures.
@@ -1745,7 +1779,9 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
-    /// Guarded hook end plus automatic handoff.
+    /// Guarded hook end plus automatic handoff; `None` when the session still
+    /// has an open explicit handoff of its own, which the end keeps instead.
+    /// See `ops::end_admitted_session_with_handoff`.
     ///
     /// `occurred_at` is the SessionEnd event's own original time (microseconds),
     /// when known; `None` falls back to "now" at the store boundary.
@@ -1755,7 +1791,7 @@ impl WriterHandle {
         summary_page_id: Option<PageId>,
         handoff: NewHandoff,
         occurred_at: Option<i64>,
-    ) -> StoreResult<HandoffId> {
+    ) -> StoreResult<Option<HandoffId>> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::EndAdmittedSessionWithHandoff {
             admitted,
@@ -1948,8 +1984,21 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Insert an explicit `memory_handoff_begin` handoff in `open` state. See
+    /// `ops::insert_manual_handoff`.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn insert_manual_handoff(&self, handoff: NewHandoff) -> StoreResult<HandoffId> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::InsertManualHandoff { handoff, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Publish a live session's turn-checkpoint baton; `None` when the session
-    /// already ended or is gone. See `ops::checkpoint_session_handoff`.
+    /// already ended or is gone, or still has an open explicit handoff of its
+    /// own. See `ops::checkpoint_session_handoff`.
     ///
     /// # Errors
     /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
@@ -2346,6 +2395,58 @@ impl WriterHandle {
             reason,
             author_id,
             params,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Record one implicit (query → page) association and return the
+    /// association's signal count after the upsert (`0` when the page is no
+    /// longer the current version in that scope). See
+    /// [`ops::record_query_page_signal`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn record_query_page_signal(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        page_id: PageId,
+        query_text: String,
+        session: Option<String>,
+    ) -> StoreResult<u32> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::RecordQuerySignal {
+            workspace_id,
+            project_id,
+            page_id,
+            query_text,
+            session,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Drop one implicit (query → page) association, returning whether a row
+    /// was removed. See [`ops::forget_query_page_signal`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn forget_query_page_signal(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        page_id: PageId,
+        query_text: String,
+    ) -> StoreResult<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::ForgetQuerySignal {
+            workspace_id,
+            project_id,
+            page_id,
+            query_text,
             reply: tx,
         })
         .await?;
@@ -2866,6 +2967,33 @@ impl WriterHandle {
             workspace_id,
             project_id,
             new_name: new_name.into(),
+            author_id,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Move the repository identity of the empty project `from` onto `into`
+    /// ([`ops::adopt_project_identity`], #1993).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] if the actor has shut down, or the
+    /// operation's own refusal.
+    pub async fn adopt_project_identity(
+        &self,
+        workspace_id: WorkspaceId,
+        into: ProjectId,
+        from: ProjectId,
+        archive_name: Option<String>,
+        author_id: Option<ai_memory_core::UserId>,
+    ) -> StoreResult<ops::AdoptedProjectIdentity> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::AdoptProjectIdentity {
+            workspace_id,
+            into,
+            from,
+            archive_name,
             author_id,
             reply: tx,
         })
@@ -3726,8 +3854,32 @@ impl WriterHandle {
         input: LinkOrAdoptManagedRunSession,
     ) -> StoreResult<ManagedRunSessionLink> {
         let (tx, rx) = oneshot::channel();
-        self.send(WriteCmd::LinkOrAdoptManagedRunSession { input, reply: tx })
-            .await?;
+        self.send(WriteCmd::LinkOrAdoptManagedRunSession {
+            input,
+            boundary: crate::workstream::ClaudeSessionBoundary::Other,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Relink an ID-selected Claude run after an authorized SessionStart
+    /// `clear` (to a never-seen native id) or `resume` (to one this
+    /// workstream held and no other live run holds). Rechecks the checkout,
+    /// operator, live lease and native-session boundary in the same
+    /// transaction that publishes the new current session.
+    pub async fn relink_managed_claude_session(
+        &self,
+        input: LinkOrAdoptManagedRunSession,
+        boundary: crate::workstream::ClaudeSessionBoundary,
+    ) -> StoreResult<ManagedRunSessionLink> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::LinkOrAdoptManagedRunSession {
+            input,
+            boundary,
+            reply: tx,
+        })
+        .await?;
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
@@ -4265,7 +4417,7 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 send_or_warn(reply, result, "sweep_hollow_projects");
             }
             WriteCmd::CloseAbandonedSessions { cutoff_us, reply } => {
-                let result = ops::close_abandoned_sessions(&conn, cutoff_us);
+                let result = ops::close_abandoned_sessions(&mut conn, cutoff_us);
                 send_or_warn(reply, result, "close_abandoned_sessions");
             }
             WriteCmd::InsertObservation { obs, reply } => {
@@ -4421,6 +4573,10 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 let result = ops::insert_handoff(&mut conn, &handoff);
                 send_or_warn(reply, result, "insert_handoff");
             }
+            WriteCmd::InsertManualHandoff { handoff, reply } => {
+                let result = ops::insert_manual_handoff(&mut conn, &handoff);
+                send_or_warn(reply, result, "insert_manual_handoff");
+            }
             WriteCmd::CheckpointSessionHandoff { handoff, reply } => {
                 let result = ops::checkpoint_session_handoff(&mut conn, &handoff);
                 send_or_warn(reply, result, "checkpoint_session_handoff");
@@ -4559,6 +4715,40 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                     &params,
                 );
                 send_or_warn(reply, result, "record_page_feedback");
+            }
+            WriteCmd::RecordQuerySignal {
+                workspace_id,
+                project_id,
+                page_id,
+                query_text,
+                session,
+                reply,
+            } => {
+                let result = ops::record_query_page_signal(
+                    &mut conn,
+                    workspace_id,
+                    project_id,
+                    page_id,
+                    &query_text,
+                    session.as_deref(),
+                );
+                send_or_warn(reply, result, "record_query_page_signal");
+            }
+            WriteCmd::ForgetQuerySignal {
+                workspace_id,
+                project_id,
+                page_id,
+                query_text,
+                reply,
+            } => {
+                let result = ops::forget_query_page_signal(
+                    &mut conn,
+                    workspace_id,
+                    project_id,
+                    page_id,
+                    &query_text,
+                );
+                send_or_warn(reply, result, "forget_query_page_signal");
             }
             WriteCmd::BumpAccess {
                 page_ids,
@@ -4860,6 +5050,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                     commit,
                 );
                 send_or_warn(reply, result, "repair_session_times");
+            }
+            WriteCmd::AdoptProjectIdentity {
+                workspace_id,
+                into,
+                from,
+                archive_name,
+                author_id,
+                reply,
+            } => {
+                let result = ops::adopt_project_identity(
+                    &mut conn,
+                    &workspace_id,
+                    &into,
+                    &from,
+                    archive_name.as_deref(),
+                    author_id,
+                );
+                send_or_warn(reply, result, "adopt_project_identity");
             }
             WriteCmd::RenameProject {
                 workspace_id,
@@ -5249,8 +5457,13 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 );
                 send_or_warn(reply, result, "link_managed_run_session");
             }
-            WriteCmd::LinkOrAdoptManagedRunSession { input, reply } => {
-                let result = crate::workstream::link_or_adopt_native_session(&mut conn, &input);
+            WriteCmd::LinkOrAdoptManagedRunSession {
+                input,
+                boundary,
+                reply,
+            } => {
+                let result =
+                    crate::workstream::link_or_adopt_native_session(&mut conn, &input, boundary);
                 send_or_warn(reply, result, "link_or_adopt_managed_run_session");
             }
             WriteCmd::LinkManagedRunSessionInScope { input, reply } => {

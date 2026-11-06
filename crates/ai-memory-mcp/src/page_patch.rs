@@ -83,10 +83,28 @@ struct Section {
     content: Range<usize>,
 }
 
+/// Where an insertion goes among others at the same offset. Every edit
+/// resolves against the captured body, so text for an existing section comes
+/// first, then an `end_of_page` append (the end of the page that was read),
+/// then new headings. Text after a new heading belongs to that section, so a
+/// caller who wants it there puts it in the `add_section` content. Request order alone
+/// would put a section append that follows an `add_section` under the new
+/// heading whenever both land at the end of the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Placement {
+    Section,
+    EndOfPage,
+    NewSection,
+}
+
 #[derive(Debug)]
 struct Change {
     range: Range<usize>,
     replacement: String,
+    placement: Placement,
+    /// Where the heading of the existing section this edit writes into
+    /// starts; `None` for an `end_of_page` append and a new section.
+    heading: Option<usize>,
 }
 
 pub(crate) fn section_hashes(body: &str) -> (Vec<SectionHash>, bool) {
@@ -137,6 +155,8 @@ pub(crate) fn apply(body: &str, edits: &[PagePatchEdit]) -> Result<String, Patch
                 Change {
                     range: body.len()..body.len(),
                     replacement: appended(body, content),
+                    placement: Placement::EndOfPage,
+                    heading: None,
                 }
             }
             PagePatchEdit::Append {
@@ -152,6 +172,8 @@ pub(crate) fn apply(body: &str, edits: &[PagePatchEdit]) -> Result<String, Patch
                 Change {
                     range: section.whole.end..section.whole.end,
                     replacement: appended(&body[section.whole.clone()], content),
+                    placement: Placement::Section,
+                    heading: Some(section.whole.start),
                 }
             }
             PagePatchEdit::AddSection { anchor, content } => {
@@ -165,7 +187,9 @@ pub(crate) fn apply(body: &str, edits: &[PagePatchEdit]) -> Result<String, Patch
                 let heading = format!("{} {}", "#".repeat(level as usize), title);
                 Change {
                     range: body.len()..body.len(),
-                    replacement: appended(body, &format!("{heading}\n{content}")),
+                    replacement: new_section(&heading, content),
+                    placement: Placement::NewSection,
+                    heading: None,
                 }
             }
             PagePatchEdit::ReplaceSection {
@@ -188,19 +212,46 @@ pub(crate) fn apply(body: &str, edits: &[PagePatchEdit]) -> Result<String, Patch
                 Change {
                     range: section.content.clone(),
                     replacement: section_content(content),
+                    placement: Placement::Section,
+                    heading: Some(section.whole.start),
                 }
             }
         };
         changes.push(change);
     }
 
-    changes.sort_by_key(|change| (change.range.start, change.range.end));
+    // A replacement deletes every section nested in it, so no other edit may
+    // write into one of those. An append to the last nested section inserts
+    // exactly where the replaced range ends, which the range check below lets
+    // through.
+    if changes.iter().any(|replaced| {
+        changes
+            .iter()
+            .filter_map(|change| change.heading)
+            .any(|heading| replaced.range.contains(&heading))
+    }) {
+        return Err(PatchError::Overlapping);
+    }
+
+    changes.sort_by_key(|change| (change.range.start, change.range.end, change.placement));
     let mut merged: Vec<Change> = Vec::with_capacity(changes.len());
-    for change in changes {
-        if let Some(previous) = merged.last_mut()
-            && previous.range.is_empty()
-            && change.range == previous.range
-        {
+    for mut change in changes {
+        let joins_previous = merged
+            .last()
+            .is_some_and(|previous| previous.range.is_empty() && change.range == previous.range);
+        if change.placement == Placement::NewSection {
+            // A heading needs a blank line before it (MD022), measured
+            // against whatever lands right before it: another insertion at
+            // the same offset, or the page text.
+            let preceding = match merged.last() {
+                Some(previous) if joins_previous => previous.replacement.as_str(),
+                _ => &body[..change.range.start],
+            };
+            change
+                .replacement
+                .insert_str(0, blank_line_before(preceding));
+        }
+        if joins_previous && let Some(previous) = merged.last_mut() {
             previous.replacement.push_str(&change.replacement);
             continue;
         }
@@ -378,6 +429,28 @@ fn appended(existing: &str, content: &str) -> String {
     format!("{prefix}{content}{suffix}")
 }
 
+/// A new section's heading, a blank line, then its text (MD022). The blank
+/// line before the heading depends on what precedes it, so the merge step
+/// adds it.
+fn new_section(heading: &str, content: &str) -> String {
+    let content = content.trim_start_matches('\n');
+    if content.is_empty() {
+        return format!("{heading}\n");
+    }
+    let suffix = if content.ends_with('\n') { "" } else { "\n" };
+    format!("{heading}\n\n{content}{suffix}")
+}
+
+fn blank_line_before(preceding: &str) -> &'static str {
+    if preceding.is_empty() || preceding.ends_with("\n\n") {
+        ""
+    } else if preceding.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    }
+}
+
 fn section_content(content: &str) -> String {
     let suffix = if content.is_empty() || content.ends_with('\n') {
         ""
@@ -497,8 +570,214 @@ mod tests {
         .unwrap();
         assert_eq!(
             patched,
-            "# T\n## Log\none\nnext\n## Tail\ntwo\n## Fresh\nnew\n"
+            "# T\n## Log\none\nnext\n## Tail\ntwo\n\n## Fresh\n\nnew\n"
         );
+    }
+
+    /// An append to the last section, an `end_of_page` append and a new
+    /// section all insert at the end of the page. Each still lands where its
+    /// anchor resolved in the captured body, whatever the request order.
+    #[test]
+    fn same_offset_edits_land_where_they_resolved_in_any_order() {
+        let body = "# Status\n## Log\nold\n";
+        let edits = [
+            PagePatchEdit::Append {
+                target: AppendTarget::Section,
+                anchor: Some("Log".into()),
+                content: "entry".into(),
+            },
+            PagePatchEdit::Append {
+                target: AppendTarget::EndOfPage,
+                anchor: None,
+                content: "footer".into(),
+            },
+            PagePatchEdit::AddSection {
+                anchor: "## Decisions".into(),
+                content: "d1".into(),
+            },
+        ];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let batch = order.map(|index| edits[index].clone());
+            assert_eq!(
+                apply(body, &batch).unwrap(),
+                "# Status\n## Log\nold\nentry\nfooter\n\n## Decisions\n\nd1\n",
+                "request order {order:?}"
+            );
+        }
+
+        // New sections keep the order the request gave them.
+        let added = |title: &str| PagePatchEdit::AddSection {
+            anchor: format!("## {title}"),
+            content: title.to_lowercase(),
+        };
+        assert_eq!(
+            apply(body, &[added("Beta"), added("Alpha")]).unwrap(),
+            "# Status\n## Log\nold\n\n## Beta\n\nbeta\n\n## Alpha\n\nalpha\n"
+        );
+    }
+
+    /// #2015: an added heading gets a blank line on each side (MD022),
+    /// whatever precedes it, and `end_of_page` stays the end of the page that
+    /// was read, so it lands before the section the same batch adds.
+    #[test]
+    fn an_added_section_is_separated_by_blank_lines() {
+        let body = "# Test\n\n## Section A\n\nline alpha\n";
+        let edits = [
+            PagePatchEdit::Append {
+                target: AppendTarget::Section,
+                anchor: Some("Section A".into()),
+                content: "line beta".into(),
+            },
+            PagePatchEdit::AddSection {
+                anchor: "## Section B".into(),
+                content: "line gamma".into(),
+            },
+            PagePatchEdit::Append {
+                target: AppendTarget::EndOfPage,
+                anchor: None,
+                content: "line delta".into(),
+            },
+        ];
+        assert_eq!(
+            apply(body, &edits).unwrap(),
+            "# Test\n\n## Section A\n\nline alpha\nline beta\nline delta\n\n## Section B\n\nline gamma\n"
+        );
+        let add = |content: &str| PagePatchEdit::AddSection {
+            anchor: "## New".into(),
+            content: content.into(),
+        };
+        // No newline at EOF, an existing blank line, an empty page, an empty
+        // section and content that already opens with a blank line.
+        assert_eq!(
+            apply("# T\nx", &[add("y")]).unwrap(),
+            "# T\nx\n\n## New\n\ny\n"
+        );
+        assert_eq!(
+            apply("# T\n\n", &[add("y")]).unwrap(),
+            "# T\n\n## New\n\ny\n"
+        );
+        assert_eq!(apply("", &[add("y")]).unwrap(), "## New\n\ny\n");
+        assert_eq!(apply("# T\n", &[add("")]).unwrap(), "# T\n\n## New\n");
+        assert_eq!(
+            apply("# T\n", &[add("\ny")]).unwrap(),
+            "# T\n\n## New\n\ny\n"
+        );
+    }
+
+    /// Replacing a section deletes the sections nested in it, so an edit to
+    /// one of them overlaps the replacement, also when it inserts exactly
+    /// where the replaced range ends. Edits outside the replaced section
+    /// still apply.
+    #[test]
+    fn edits_to_sections_inside_a_replaced_one_overlap_it() {
+        let replace = |body: &str, anchor: &str, content: &str| PagePatchEdit::ReplaceSection {
+            anchor: anchor.into(),
+            section_sha256: section_hashes(body)
+                .0
+                .into_iter()
+                .find(|section| section.anchor == anchor)
+                .unwrap()
+                .sha256,
+            content: content.into(),
+        };
+        let append = |anchor: &str| PagePatchEdit::Append {
+            target: AppendTarget::Section,
+            anchor: Some(anchor.into()),
+            content: "x".into(),
+        };
+
+        // `### Child` is the last section inside `## One`.
+        let body = "# T\n## One\nold\n### Child\nkept\n## Two\nother\n";
+        let replace_one = replace(body, "One", "new");
+        for batch in [
+            [replace_one.clone(), append("Child")],
+            [append("Child"), replace_one.clone()],
+        ] {
+            assert_eq!(apply(body, &batch), Err(PatchError::Overlapping));
+        }
+        // A nested section with no text of its own is replaced in place too.
+        let empty_child = "# T\n## One\nold\n### Child\n## Two\nother\n";
+        assert_eq!(
+            apply(
+                empty_child,
+                &[
+                    replace(empty_child, "One", "new"),
+                    replace(empty_child, "Child", "y"),
+                ]
+            ),
+            Err(PatchError::Overlapping)
+        );
+
+        // Controls: the next section and the page title are not inside it.
+        assert_eq!(
+            apply(body, &[replace_one.clone(), append("Two")]).unwrap(),
+            "# T\n## One\nnew\n## Two\nother\nx\n"
+        );
+        assert_eq!(
+            apply(body, &[replace_one, append("T")]).unwrap(),
+            "# T\n## One\nnew\n## Two\nother\nx\n"
+        );
+        // When the replaced section ends the page, the end of the page and a
+        // new section still follow it.
+        let last = "# T\n## Zero\nz\n## One\nold\n### Child\nkept\n";
+        let end_of_page = PagePatchEdit::Append {
+            target: AppendTarget::EndOfPage,
+            anchor: None,
+            content: "footer".into(),
+        };
+        let next = PagePatchEdit::AddSection {
+            anchor: "## Next".into(),
+            content: "n".into(),
+        };
+        assert_eq!(
+            apply(last, &[replace(last, "One", "new"), end_of_page, next]).unwrap(),
+            "# T\n## Zero\nz\n## One\nnew\nfooter\n\n## Next\n\nn\n"
+        );
+        assert_eq!(
+            apply(last, &[replace(last, "One", "new"), append("Child")]),
+            Err(PatchError::Overlapping)
+        );
+    }
+
+    /// The durable-pages skill tells agents how to write these edits, so every
+    /// op it names has to be one the tool accepts. It once named
+    /// `append_to_section`, which fails to deserialize.
+    #[test]
+    fn the_durable_pages_skill_names_only_ops_the_tool_accepts() {
+        let skill = ai_memory_core::routing_skills::MANAGED_SKILLS
+            .iter()
+            .find(|skill| skill.name == "ai-memory-durable-pages")
+            .expect("the durable-pages skill is bundled")
+            .content;
+        let mut named = skill
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|word| *word == "append" || word.ends_with("_section"))
+            .collect::<Vec<_>>();
+        named.sort_unstable();
+        named.dedup();
+        for op in ["append", "add_section", "replace_section"] {
+            assert!(named.contains(&op), "the skill never names `{op}`");
+        }
+        for op in named {
+            let edit = serde_json::json!({
+                "op": op,
+                "target": "section",
+                "anchor": "## Notes",
+                "section_sha256": "0",
+                "content": "x",
+            });
+            assert!(
+                serde_json::from_value::<PagePatchEdit>(edit).is_ok(),
+                "the skill names `{op}`, which memory_patch_page rejects"
+            );
+        }
     }
 
     #[test]
@@ -527,7 +806,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             patched,
-            "# T\n## Notes on C#\nold\nmore\n## Tail ##\nend\n## F#\nnew\n"
+            "# T\n## Notes on C#\nold\nmore\n## Tail ##\nend\n\n## F#\n\nnew\n"
         );
     }
 }
