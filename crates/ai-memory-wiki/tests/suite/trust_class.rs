@@ -72,7 +72,11 @@ async fn reindex_rebuild_does_not_mark_rebuilt_pages_operator_authored() {
         .get_or_create_project(ws, "trust", None)
         .await
         .unwrap();
-    let wiki = Wiki::new(src.path(), source.writer.clone()).unwrap();
+    // The reader lets the first write materialize the scope manifests
+    // `reindex_all` reads the workspace and project names from.
+    let wiki = Wiki::new(src.path(), source.writer.clone())
+        .unwrap()
+        .with_store_reader(source.reader.clone());
     for (path, class) in [
         ("notes/fetched.md", TrustClass::ToolResult),
         ("notes/typed.md", TrustClass::OperatorAuthored),
